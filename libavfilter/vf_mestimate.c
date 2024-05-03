@@ -35,13 +35,20 @@ typedef struct MEContext {
 
     int mb_size;                        ///< macroblock size
     int search_param;                   ///< search parameter
+    int onlyprev;                       ///< onlyprev parameter
     int b_width, b_height, b_count;
     int log2_mb_size;
 
     AVFrame *prev, *cur, *next;
+    int current_dir;
 
     int (*mv_table[3])[2][2];           ///< motion vectors of current & prev 2 frames
 } MEContext;
+
+typedef struct ThreadData {
+    AVMotionEstContext *me_ctx;
+    AVMotionVector *mv_data;
+} ThreadData;
 
 #define OFFSET(x) offsetof(MEContext, x)
 #define FLAGS AV_OPT_FLAG_VIDEO_PARAM|AV_OPT_FLAG_FILTERING_PARAM
@@ -60,6 +67,7 @@ static const AVOption mestimate_options[] = {
         CONST("umh",   "uneven multi-hexagon search",        AV_ME_METHOD_UMH,      "method"),
     { "mb_size", "macroblock size", OFFSET(mb_size), AV_OPT_TYPE_INT, {.i64 = 16}, 8, INT_MAX, FLAGS },
     { "search_param", "search parameter", OFFSET(search_param), AV_OPT_TYPE_INT, {.i64 = 7}, 4, INT_MAX, FLAGS },
+    { "onlyprev", "use only previous frame for motion estimation", OFFSET(onlyprev), AV_OPT_TYPE_BOOL, {.i64 = 0}, 0, 1, FLAGS },
     { NULL }
 };
 
@@ -116,15 +124,15 @@ static void add_mv_data(AVMotionVector *mv, int mb_size,
     mv->flags = 0;
 }
 
-#define SEARCH_MV(method)\
+#define SEARCH_MV_SLICE(method)\
     do {\
-        for (mb_y = 0; mb_y < s->b_height; mb_y++)\
+        for (mb_y = slice_start; mb_y < slice_end; mb_y++)\
             for (mb_x = 0; mb_x < s->b_width; mb_x++) {\
-                const int x_mb = mb_x << s->log2_mb_size;\
-                const int y_mb = mb_y << s->log2_mb_size;\
+                const int x_mb = (mb_x << s->log2_mb_size);\
+                const int y_mb = (mb_y << s->log2_mb_size);\
                 int mv[2] = {x_mb, y_mb};\
                 ff_me_search_##method(me_ctx, x_mb, y_mb, mv);\
-                add_mv_data(((AVMotionVector *) sd->data) + mv_count++, me_ctx->mb_size, x_mb, y_mb, mv[0], mv[1], dir);\
+                add_mv_data(td->mv_data + mv_count++, s->mb_size, x_mb, y_mb, mv[0], mv[1], dir);\
             }\
     } while (0)
 
@@ -135,15 +143,170 @@ static void add_mv_data(AVMotionVector *mv, int mb_size,
         preds.nb++;\
     } while(0)
 
+
+static int filter_slice(AVFilterContext *ctx, void *arg, int jobnr, int nb_jobs)
+{
+    MEContext *s = ctx->priv;
+    ThreadData *td = arg;
+    AVMotionEstContext *me_ctx = td->me_ctx;
+    int mb_y, mb_x;
+    int dir = s->current_dir;
+
+    int slice_size = s->b_height / nb_jobs;
+    if (slice_size * nb_jobs < s->b_height)
+        slice_size++;
+    int slice_start = jobnr * slice_size;
+    int slice_end = min(slice_start + slice_size, s->b_height);
+    int mv_count = slice_start * s->b_width + (dir * s->b_height * s->b_width);
+
+    if (s->method == AV_ME_METHOD_DS)
+        SEARCH_MV_SLICE(ds);
+    else if (s->method == AV_ME_METHOD_ESA)
+        SEARCH_MV_SLICE(esa);
+    else if (s->method == AV_ME_METHOD_FSS)
+        SEARCH_MV_SLICE(fss);
+    else if (s->method == AV_ME_METHOD_NTSS)
+        SEARCH_MV_SLICE(ntss);
+    else if (s->method == AV_ME_METHOD_TDLS)
+        SEARCH_MV_SLICE(tdls);
+    else if (s->method == AV_ME_METHOD_TSS)
+        SEARCH_MV_SLICE(tss);
+    else if (s->method == AV_ME_METHOD_HEXBS)
+        SEARCH_MV_SLICE(hexbs);
+    else if (s->method == AV_ME_METHOD_UMH) {
+        for (mb_y = slice_start; mb_y < slice_end; mb_y++)
+            for (mb_x = 0; mb_x < s->b_width; mb_x++) {
+                const int mb_i = mb_x + mb_y * s->b_width;
+                const int x_mb = mb_x << s->log2_mb_size;
+                const int y_mb = mb_y << s->log2_mb_size;
+                int mv[2] = {x_mb, y_mb};
+
+                AVMotionEstPredictor *preds = me_ctx->preds;
+                preds[0].nb = 0;
+
+                ADD_PRED(preds[0], 0, 0);
+
+                //left mb in current frame
+                if (mb_x > 0)
+                    ADD_PRED(preds[0], s->mv_table[0][mb_i - 1][dir][0], s->mv_table[0][mb_i - 1][dir][1]);
+
+                if (mb_y > 0) {
+                    //top mb in current frame
+                    ADD_PRED(preds[0], s->mv_table[0][mb_i - s->b_width][dir][0], s->mv_table[0][mb_i - s->b_width][dir][1]);
+
+                    //top-right mb in current frame
+                    if (mb_x + 1 < s->b_width)
+                        ADD_PRED(preds[0], s->mv_table[0][mb_i - s->b_width + 1][dir][0], s->mv_table[0][mb_i - s->b_width + 1][dir][1]);
+                    //top-left mb in current frame
+                    else if (mb_x > 0)
+                        ADD_PRED(preds[0], s->mv_table[0][mb_i - s->b_width - 1][dir][0], s->mv_table[0][mb_i - s->b_width - 1][dir][1]);
+                }
+
+                //median predictor
+                if (preds[0].nb == 4) {
+                    me_ctx->pred_x = mid_pred(preds[0].mvs[1][0], preds[0].mvs[2][0], preds[0].mvs[3][0]);
+                    me_ctx->pred_y = mid_pred(preds[0].mvs[1][1], preds[0].mvs[2][1], preds[0].mvs[3][1]);
+                } else if (preds[0].nb == 3) {
+                    me_ctx->pred_x = mid_pred(0, preds[0].mvs[1][0], preds[0].mvs[2][0]);
+                    me_ctx->pred_y = mid_pred(0, preds[0].mvs[1][1], preds[0].mvs[2][1]);
+                } else if (preds[0].nb == 2) {
+                    me_ctx->pred_x = preds[0].mvs[1][0];
+                    me_ctx->pred_y = preds[0].mvs[1][1];
+                } else {
+                    me_ctx->pred_x = 0;
+                    me_ctx->pred_y = 0;
+                }
+
+                ff_me_search_umh(me_ctx, x_mb, y_mb, mv);
+
+                s->mv_table[0][mb_i][dir][0] = mv[0] - x_mb;
+                s->mv_table[0][mb_i][dir][1] = mv[1] - y_mb;
+                add_mv_data(td->mv_data + mv_count++, s->mb_size, x_mb, y_mb, mv[0], mv[1], dir);
+            }
+
+    } else if (s->method == AV_ME_METHOD_EPZS) {
+
+        for (mb_y = slice_start; mb_y < slice_end; mb_y++)
+            for (mb_x = 0; mb_x < s->b_width; mb_x++) {
+                const int mb_i = mb_x + mb_y * s->b_width;
+                const int x_mb = mb_x << s->log2_mb_size;
+                const int y_mb = mb_y << s->log2_mb_size;
+                int mv[2] = {x_mb, y_mb};
+
+                AVMotionEstPredictor *preds = me_ctx->preds;
+                preds[0].nb = 0;
+                preds[1].nb = 0;
+
+                ADD_PRED(preds[0], 0, 0);
+
+                //left mb in current frame
+                if (mb_x > 0)
+                    ADD_PRED(preds[0], s->mv_table[0][mb_i - 1][dir][0], s->mv_table[0][mb_i - 1][dir][1]);
+
+                //top mb in current frame
+                if (mb_y > 0)
+                    ADD_PRED(preds[0], s->mv_table[0][mb_i - s->b_width][dir][0], s->mv_table[0][mb_i - s->b_width][dir][1]);
+
+                //top-right mb in current frame
+                if (mb_y > 0 && mb_x + 1 < s->b_width)
+                    ADD_PRED(preds[0], s->mv_table[0][mb_i - s->b_width + 1][dir][0], s->mv_table[0][mb_i - s->b_width + 1][dir][1]);
+
+                //median predictor
+                if (preds[0].nb == 4) {
+                    me_ctx->pred_x = mid_pred(preds[0].mvs[1][0], preds[0].mvs[2][0], preds[0].mvs[3][0]);
+                    me_ctx->pred_y = mid_pred(preds[0].mvs[1][1], preds[0].mvs[2][1], preds[0].mvs[3][1]);
+                } else if (preds[0].nb == 3) {
+                    me_ctx->pred_x = mid_pred(0, preds[0].mvs[1][0], preds[0].mvs[2][0]);
+                    me_ctx->pred_y = mid_pred(0, preds[0].mvs[1][1], preds[0].mvs[2][1]);
+                } else if (preds[0].nb == 2) {
+                    me_ctx->pred_x = preds[0].mvs[1][0];
+                    me_ctx->pred_y = preds[0].mvs[1][1];
+                } else {
+                    me_ctx->pred_x = 0;
+                    me_ctx->pred_y = 0;
+                }
+
+                //collocated mb in prev frame
+                ADD_PRED(preds[0], s->mv_table[1][mb_i][dir][0], s->mv_table[1][mb_i][dir][1]);
+
+                //accelerator motion vector of collocated block in prev frame
+                ADD_PRED(preds[1], s->mv_table[1][mb_i][dir][0] + (s->mv_table[1][mb_i][dir][0] - s->mv_table[2][mb_i][dir][0]),
+                                    s->mv_table[1][mb_i][dir][1] + (s->mv_table[1][mb_i][dir][1] - s->mv_table[2][mb_i][dir][1]));
+
+                //left mb in prev frame
+                if (mb_x > 0)
+                    ADD_PRED(preds[1], s->mv_table[1][mb_i - 1][dir][0], s->mv_table[1][mb_i - 1][dir][1]);
+
+                //top mb in prev frame
+                if (mb_y > 0)
+                    ADD_PRED(preds[1], s->mv_table[1][mb_i - s->b_width][dir][0], s->mv_table[1][mb_i - s->b_width][dir][1]);
+
+                //right mb in prev frame
+                if (mb_x + 1 < s->b_width)
+                    ADD_PRED(preds[1], s->mv_table[1][mb_i + 1][dir][0], s->mv_table[1][mb_i + 1][dir][1]);
+
+                //bottom mb in prev frame
+                if (mb_y + 1 < s->b_height)
+                    ADD_PRED(preds[1], s->mv_table[1][mb_i + s->b_width][dir][0], s->mv_table[1][mb_i + s->b_width][dir][1]);
+
+                ff_me_search_epzs(me_ctx, x_mb, y_mb, mv);
+
+                s->mv_table[0][mb_i][dir][0] = mv[0] - x_mb;
+                s->mv_table[0][mb_i][dir][1] = mv[1] - y_mb;
+                add_mv_data(td->mv_data + mv_count++, s->mb_size, x_mb, y_mb, mv[0], mv[1], dir);
+            }
+    }
+
+    return 0;
+}
+
 static int filter_frame(AVFilterLink *inlink, AVFrame *frame)
 {
     AVFilterContext *ctx = inlink->dst;
     MEContext *s = ctx->priv;
     AVMotionEstContext *me_ctx = &s->me_ctx;
-    AVFrameSideData *sd;
+    AVFrameSideData *sd;    
     AVFrame *out;
-    int mb_x, mb_y, dir;
-    int32_t mv_count = 0;
     int ret;
 
     if (frame->pts == AV_NOPTS_VALUE) {
@@ -172,7 +335,7 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *frame)
     if (!out)
         return AVERROR(ENOMEM);
 
-    sd = av_frame_new_side_data(out, AV_FRAME_DATA_MOTION_VECTORS, 2 * s->b_count * sizeof(AVMotionVector));
+    sd = av_frame_new_side_data(out, AV_FRAME_DATA_MOTION_VECTORS, (s->onlyprev ? 1 : 2) * s->b_count * sizeof(AVMotionVector));
     if (!sd) {
         av_frame_free(&out);
         return AVERROR(ENOMEM);
@@ -181,146 +344,18 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *frame)
     me_ctx->data_cur = s->cur->data[0];
     me_ctx->linesize = s->cur->linesize[0];
 
-    for (dir = 0; dir < 2; dir++) {
-        me_ctx->data_ref = (dir ? s->next : s->prev)->data[0];
+    ThreadData td;
+    td.me_ctx = &s->me_ctx;
+    td.mv_data = (AVMotionVector *)sd->data;
 
-        if (s->method == AV_ME_METHOD_DS)
-            SEARCH_MV(ds);
-        else if (s->method == AV_ME_METHOD_ESA)
-            SEARCH_MV(esa);
-        else if (s->method == AV_ME_METHOD_FSS)
-            SEARCH_MV(fss);
-        else if (s->method == AV_ME_METHOD_NTSS)
-            SEARCH_MV(ntss);
-        else if (s->method == AV_ME_METHOD_TDLS)
-            SEARCH_MV(tdls);
-        else if (s->method == AV_ME_METHOD_TSS)
-            SEARCH_MV(tss);
-        else if (s->method == AV_ME_METHOD_HEXBS)
-            SEARCH_MV(hexbs);
-        else if (s->method == AV_ME_METHOD_UMH) {
-            for (mb_y = 0; mb_y < s->b_height; mb_y++)
-                for (mb_x = 0; mb_x < s->b_width; mb_x++) {
-                    const int mb_i = mb_x + mb_y * s->b_width;
-                    const int x_mb = mb_x << s->log2_mb_size;
-                    const int y_mb = mb_y << s->log2_mb_size;
-                    int mv[2] = {x_mb, y_mb};
-
-                    AVMotionEstPredictor *preds = me_ctx->preds;
-                    preds[0].nb = 0;
-
-                    ADD_PRED(preds[0], 0, 0);
-
-                    //left mb in current frame
-                    if (mb_x > 0)
-                        ADD_PRED(preds[0], s->mv_table[0][mb_i - 1][dir][0], s->mv_table[0][mb_i - 1][dir][1]);
-
-                    if (mb_y > 0) {
-                        //top mb in current frame
-                        ADD_PRED(preds[0], s->mv_table[0][mb_i - s->b_width][dir][0], s->mv_table[0][mb_i - s->b_width][dir][1]);
-
-                        //top-right mb in current frame
-                        if (mb_x + 1 < s->b_width)
-                            ADD_PRED(preds[0], s->mv_table[0][mb_i - s->b_width + 1][dir][0], s->mv_table[0][mb_i - s->b_width + 1][dir][1]);
-                        //top-left mb in current frame
-                        else if (mb_x > 0)
-                            ADD_PRED(preds[0], s->mv_table[0][mb_i - s->b_width - 1][dir][0], s->mv_table[0][mb_i - s->b_width - 1][dir][1]);
-                    }
-
-                    //median predictor
-                    if (preds[0].nb == 4) {
-                        me_ctx->pred_x = mid_pred(preds[0].mvs[1][0], preds[0].mvs[2][0], preds[0].mvs[3][0]);
-                        me_ctx->pred_y = mid_pred(preds[0].mvs[1][1], preds[0].mvs[2][1], preds[0].mvs[3][1]);
-                    } else if (preds[0].nb == 3) {
-                        me_ctx->pred_x = mid_pred(0, preds[0].mvs[1][0], preds[0].mvs[2][0]);
-                        me_ctx->pred_y = mid_pred(0, preds[0].mvs[1][1], preds[0].mvs[2][1]);
-                    } else if (preds[0].nb == 2) {
-                        me_ctx->pred_x = preds[0].mvs[1][0];
-                        me_ctx->pred_y = preds[0].mvs[1][1];
-                    } else {
-                        me_ctx->pred_x = 0;
-                        me_ctx->pred_y = 0;
-                    }
-
-                    ff_me_search_umh(me_ctx, x_mb, y_mb, mv);
-
-                    s->mv_table[0][mb_i][dir][0] = mv[0] - x_mb;
-                    s->mv_table[0][mb_i][dir][1] = mv[1] - y_mb;
-                    add_mv_data(((AVMotionVector *) sd->data) + mv_count++, me_ctx->mb_size, x_mb, y_mb, mv[0], mv[1], dir);
-                }
-
-        } else if (s->method == AV_ME_METHOD_EPZS) {
-
-            for (mb_y = 0; mb_y < s->b_height; mb_y++)
-                for (mb_x = 0; mb_x < s->b_width; mb_x++) {
-                    const int mb_i = mb_x + mb_y * s->b_width;
-                    const int x_mb = mb_x << s->log2_mb_size;
-                    const int y_mb = mb_y << s->log2_mb_size;
-                    int mv[2] = {x_mb, y_mb};
-
-                    AVMotionEstPredictor *preds = me_ctx->preds;
-                    preds[0].nb = 0;
-                    preds[1].nb = 0;
-
-                    ADD_PRED(preds[0], 0, 0);
-
-                    //left mb in current frame
-                    if (mb_x > 0)
-                        ADD_PRED(preds[0], s->mv_table[0][mb_i - 1][dir][0], s->mv_table[0][mb_i - 1][dir][1]);
-
-                    //top mb in current frame
-                    if (mb_y > 0)
-                        ADD_PRED(preds[0], s->mv_table[0][mb_i - s->b_width][dir][0], s->mv_table[0][mb_i - s->b_width][dir][1]);
-
-                    //top-right mb in current frame
-                    if (mb_y > 0 && mb_x + 1 < s->b_width)
-                        ADD_PRED(preds[0], s->mv_table[0][mb_i - s->b_width + 1][dir][0], s->mv_table[0][mb_i - s->b_width + 1][dir][1]);
-
-                    //median predictor
-                    if (preds[0].nb == 4) {
-                        me_ctx->pred_x = mid_pred(preds[0].mvs[1][0], preds[0].mvs[2][0], preds[0].mvs[3][0]);
-                        me_ctx->pred_y = mid_pred(preds[0].mvs[1][1], preds[0].mvs[2][1], preds[0].mvs[3][1]);
-                    } else if (preds[0].nb == 3) {
-                        me_ctx->pred_x = mid_pred(0, preds[0].mvs[1][0], preds[0].mvs[2][0]);
-                        me_ctx->pred_y = mid_pred(0, preds[0].mvs[1][1], preds[0].mvs[2][1]);
-                    } else if (preds[0].nb == 2) {
-                        me_ctx->pred_x = preds[0].mvs[1][0];
-                        me_ctx->pred_y = preds[0].mvs[1][1];
-                    } else {
-                        me_ctx->pred_x = 0;
-                        me_ctx->pred_y = 0;
-                    }
-
-                    //collocated mb in prev frame
-                    ADD_PRED(preds[0], s->mv_table[1][mb_i][dir][0], s->mv_table[1][mb_i][dir][1]);
-
-                    //accelerator motion vector of collocated block in prev frame
-                    ADD_PRED(preds[1], s->mv_table[1][mb_i][dir][0] + (s->mv_table[1][mb_i][dir][0] - s->mv_table[2][mb_i][dir][0]),
-                                       s->mv_table[1][mb_i][dir][1] + (s->mv_table[1][mb_i][dir][1] - s->mv_table[2][mb_i][dir][1]));
-
-                    //left mb in prev frame
-                    if (mb_x > 0)
-                        ADD_PRED(preds[1], s->mv_table[1][mb_i - 1][dir][0], s->mv_table[1][mb_i - 1][dir][1]);
-
-                    //top mb in prev frame
-                    if (mb_y > 0)
-                        ADD_PRED(preds[1], s->mv_table[1][mb_i - s->b_width][dir][0], s->mv_table[1][mb_i - s->b_width][dir][1]);
-
-                    //right mb in prev frame
-                    if (mb_x + 1 < s->b_width)
-                        ADD_PRED(preds[1], s->mv_table[1][mb_i + 1][dir][0], s->mv_table[1][mb_i + 1][dir][1]);
-
-                    //bottom mb in prev frame
-                    if (mb_y + 1 < s->b_height)
-                        ADD_PRED(preds[1], s->mv_table[1][mb_i + s->b_width][dir][0], s->mv_table[1][mb_i + s->b_width][dir][1]);
-
-                    ff_me_search_epzs(me_ctx, x_mb, y_mb, mv);
-
-                    s->mv_table[0][mb_i][dir][0] = mv[0] - x_mb;
-                    s->mv_table[0][mb_i][dir][1] = mv[1] - y_mb;
-                    add_mv_data(((AVMotionVector *) sd->data) + mv_count++, s->mb_size, x_mb, y_mb, mv[0], mv[1], dir);
-                }
-        }
+    s->current_dir = 0;
+    me_ctx->data_ref = s->prev->data[0];
+    ff_filter_execute(ctx, filter_slice, &td, NULL, FFMIN(s->b_height, ff_filter_get_nb_threads(ctx)));
+    if (!s->onlyprev)
+    {
+        s->current_dir = 1;
+        me_ctx->data_ref = s->next->data[0];
+        ff_filter_execute(ctx, filter_slice, &td, NULL, FFMIN(s->b_height, ff_filter_get_nb_threads(ctx)));
     }
 
     return ff_filter_frame(ctx->outputs[0], out);
@@ -354,7 +389,7 @@ const AVFilter ff_vf_mestimate = {
     .priv_size     = sizeof(MEContext),
     .priv_class    = &mestimate_class,
     .uninit        = uninit,
-    .flags         = AVFILTER_FLAG_METADATA_ONLY,
+    .flags         = AVFILTER_FLAG_METADATA_ONLY | AVFILTER_FLAG_SLICE_THREADS,
     FILTER_INPUTS(mestimate_inputs),
     FILTER_OUTPUTS(ff_video_default_filterpad),
     FILTER_PIXFMTS_ARRAY(pix_fmts),
