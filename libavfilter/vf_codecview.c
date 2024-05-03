@@ -300,8 +300,8 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *frame)
                                    100, 0, direction);
                 } else if (s->mv)
                     if ((direction == 0 && (s->mv & MV_P_FOR)  && frame->pict_type == AV_PICTURE_TYPE_P) ||
-                        (direction == 0 && (s->mv & MV_B_FOR)  && frame->pict_type == AV_PICTURE_TYPE_B) ||
-                        (direction == 1 && (s->mv & MV_B_BACK) && frame->pict_type == AV_PICTURE_TYPE_B))
+                        (direction == 0 && (s->mv & MV_B_FOR)  && (frame->pict_type == AV_PICTURE_TYPE_B || frame->pict_type == AV_PICTURE_TYPE_NONE)) ||
+                        (direction == 1 && (s->mv & MV_B_BACK) && (frame->pict_type == AV_PICTURE_TYPE_B || frame->pict_type == AV_PICTURE_TYPE_NONE)))
                         draw_arrow(frame->data[0], mv->dst_x, mv->dst_y, mv->src_x, mv->src_y,
                                    frame->width, frame->height, frame->linesize[0],
                                    100, 0, direction);
