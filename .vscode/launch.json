@@ -1,0 +1,38 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "(Windows) Launch",
+            "type": "cppvsdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/../../build/ffmpeg/ffmpeg.exe",
+            "args": [
+                "-y", 
+                // "-flags2", 
+                // "+export_mvs", 
+                //"-ss", "15",
+                "-i", "E:\\Sources.zalunda\\ffmpeg-DEV\\TestFile.mp4",
+                //"-filter_complex", "[0:v]crop=in_w/2[A];[0:v]crop=in_w/2[B];[A][B]hstack=inputs=2,mestimate=tdls:mb_size=32:search_param=7:onlyprev=1,extract_mvs=filename=toto.mvs:mb_size=32,codecview=mv=pf+bf+bb[v]",
+                //"-filter_complex", "mestimate=tdls:mb_size=8:search_param=7:onlyprev=1,extract_mvs=filename=toto.mvs:mb_size=8,codecview=mv=pf+bf+bb[v]",
+                //"-filter_complex", "[0:v]v360=input=he:in_stereo=sbs:pitch=-25:yaw=0:roll=0:output=flat:d_fov=120:w=2048:h=2048[A];[A]mestimate=tdls:mb_size=8:search_param=7:onlyprev=1,extract_mvs=filename=toto.mvs:mb_size=8,codecview=mv=pf+bf+bb[v]",
+                "-filter_complex", "[0:v]v360=input=he:in_stereo=sbs:pitch=-25:yaw=0:roll=0:output=flat:d_fov=120:w=2048:h=2048[A];[A]mestimate=tdls:mb_size=8:search_param=7:onlyprev=1,extract_mvs=filename=toto.mvs:mb_size=8,codecview=mv=pf+bf+bb:visualization=color[v]",
+                "-map", "[v]",
+                "-map", "0:a",
+                "-g", "1", 
+                "-c:a", "copy",
+                "-threads", "32",
+                "-crf", "0",
+                // "-f", "null", "-"
+                "E:\\Sources.zalunda\\ffmpeg-DEV\\TestFile-Result.mp4"
+            ],
+            "stopAtEntry": false,
+            "cwd": "E:\\Sources.zalunda\\ffmpeg-DEV", // "${fileDirname}"
+            "environment": [],
+            "console": "internalConsole" // "internalConsole"
+        }
+
+    ]
+}

@@ -47,6 +47,8 @@
 #define FRAME_TYPE_I (1<<0)
 #define FRAME_TYPE_P (1<<1)
 #define FRAME_TYPE_B (1<<2)
+#define VISUALIZATION_ARROW 0  
+#define VISUALIZATION_COLOR 1
 
 typedef struct CodecViewContext {
     const AVClass *class;
@@ -56,6 +58,7 @@ typedef struct CodecViewContext {
     int hsub, vsub;
     int qp;
     int block;
+    int visualization;
 } CodecViewContext;
 
 #define OFFSET(x) offsetof(CodecViewContext, x)
@@ -78,6 +81,9 @@ static const AVOption codecview_options[] = {
         CONST("pf", "P-frames", FRAME_TYPE_P, "frame_type"),
         CONST("bf", "B-frames", FRAME_TYPE_B, "frame_type"),
     { "block",      "set block partitioning structure to visualize", OFFSET(block), AV_OPT_TYPE_BOOL, {.i64=0}, 0, 1, FLAGS },
+    { "visualization", "set visualization type", OFFSET(visualization), AV_OPT_TYPE_FLAGS, {.i64=0}, 0, INT_MAX, FLAGS, .unit = "visualization" },
+        CONST("arrow", "arrow", VISUALIZATION_ARROW, "visualization"),
+        CONST("color", "color", VISUALIZATION_COLOR, "visualization"),
     { NULL }
 };
 
@@ -219,6 +225,58 @@ static void draw_block_rectangle(uint8_t *buf, int sx, int sy, int w, int h, ptr
     }
 }
 
+static void draw_motion_block(AVFrame *frame, int x, int y, int block_w, int block_h,
+                              int motionX, int motionY)
+{
+    // Scale factor for motion to YUV intensity (adjust as needed)
+    const float scale = 8.0f;
+
+    // Calculate YUV values based on motion
+    int Y = (int)((fabs(motionY) + fabs(motionX)) * scale); // Brightness
+    int U = 128 - (int)(motionX * scale);       // Blue-Yellow
+    int V = 128 - (int)(motionY * scale);       // Red-Cyan
+    //U = 128;
+    //Y = motionY == 0 && motionX == 0 ? 0 : 128;
+
+    // Clamp YUV values
+    Y = av_clip(Y, 16, 235);  // Y range for video
+    U = av_clip(U, 16, 240);  // U range for video
+    V = av_clip(V, 16, 240);  // V range for video
+
+    int w = frame->width;
+    int h = frame->height;
+
+    // Draw Y (luma) component
+    uint8_t *y_plane = frame->data[0];
+    int y_stride = frame->linesize[0];
+    for (int dy = 0; dy < block_h && y + dy < h; dy++) {
+        for (int dx = 0; dx < block_w / 2 && x + dx < w; dx++) {
+            int pos = (y + dy) * y_stride + (x + dx);
+            y_plane[pos] = Y;
+        }
+    }
+
+    // Draw U and V (chroma) components
+    uint8_t *u_plane = frame->data[1];
+    uint8_t *v_plane = frame->data[2];
+    int uv_stride = frame->linesize[1];  // Assuming U and V have the same stride
+
+    int chroma_x = x / 2;
+    int chroma_y = y / 2;
+    int chroma_w = (w + 1) / 2;
+    int chroma_h = (h + 1) / 2;
+    int chroma_block_w = (block_w + 1) / 2;
+    int chroma_block_h = (block_h + 1) / 2;
+
+    for (int dy = 0; dy < chroma_block_h && chroma_y + dy < chroma_h; dy++) {
+        for (int dx = 0; dx < chroma_block_w/2 && chroma_x + dx < chroma_w; dx++) {
+            int pos = (chroma_y + dy) * uv_stride + (chroma_x + dx);
+            u_plane[pos] = U;
+            v_plane[pos] = V;
+        }
+    }
+}
+
 static int filter_frame(AVFilterLink *inlink, AVFrame *frame)
 {
     AVFilterContext *ctx = inlink->dst;
@@ -257,7 +315,7 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *frame)
         av_freep(&qp_table);
     }
 
-    if (s->block) {
+    if (s->block && s->visualization == VISUALIZATION_ARROW) {
         AVFrameSideData *sd = av_frame_get_side_data(frame, AV_FRAME_DATA_VIDEO_ENC_PARAMS);
         if (sd) {
             AVVideoEncParams *par = (AVVideoEncParams*)sd->data;
@@ -277,13 +335,12 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *frame)
     if (s->mv || s->mv_type) {
         AVFrameSideData *sd = av_frame_get_side_data(frame, AV_FRAME_DATA_MOTION_VECTORS);
         if (sd) {
-            int i;
             const AVMotionVector *mvs = (const AVMotionVector *)sd->data;
             const int is_iframe = (s->frame_type & FRAME_TYPE_I) && frame->pict_type == AV_PICTURE_TYPE_I;
             const int is_pframe = (s->frame_type & FRAME_TYPE_P) && frame->pict_type == AV_PICTURE_TYPE_P;
             const int is_bframe = (s->frame_type & FRAME_TYPE_B) && frame->pict_type == AV_PICTURE_TYPE_B;
 
-            for (i = 0; i < sd->size / sizeof(*mvs); i++) {
+            for (int i = 0; i < sd->size / sizeof(*mvs); i++) {
                 const AVMotionVector *mv = &mvs[i];
                 const int direction = mv->source > 0;
 
@@ -294,17 +351,33 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *frame)
                     if ((!s->frame_type && (is_fp || is_bp)) ||
                         is_iframe && is_fp || is_iframe && is_bp ||
                         is_pframe && is_fp ||
-                        is_bframe && is_fp || is_bframe && is_bp)
-                        draw_arrow(frame->data[0], mv->dst_x, mv->dst_y, mv->src_x, mv->src_y,
-                                   frame->width, frame->height, frame->linesize[0],
-                                   100, 0, direction);
-                } else if (s->mv)
+                        is_bframe && is_fp || is_bframe && is_bp) {
+                        
+                        if (s->visualization == VISUALIZATION_ARROW) {
+                            draw_arrow(frame->data[0], mv->dst_x, mv->dst_y, mv->src_x, mv->src_y,
+                                    frame->width, frame->height, frame->linesize[0],
+                                    100, 0, direction);
+                        }
+                        else if (s->visualization == VISUALIZATION_COLOR) {
+                            draw_motion_block(frame, mv->dst_x, mv->dst_y, mv->w, mv->h,
+                                        mv->dst_x - mv->src_x, mv->dst_y - mv->src_y);
+                        }
+                    }
+                } else if (s->mv) {
                     if ((direction == 0 && (s->mv & MV_P_FOR)  && frame->pict_type == AV_PICTURE_TYPE_P) ||
                         (direction == 0 && (s->mv & MV_B_FOR)  && (frame->pict_type == AV_PICTURE_TYPE_B || frame->pict_type == AV_PICTURE_TYPE_NONE)) ||
-                        (direction == 1 && (s->mv & MV_B_BACK) && (frame->pict_type == AV_PICTURE_TYPE_B || frame->pict_type == AV_PICTURE_TYPE_NONE)))
-                        draw_arrow(frame->data[0], mv->dst_x, mv->dst_y, mv->src_x, mv->src_y,
-                                   frame->width, frame->height, frame->linesize[0],
-                                   100, 0, direction);
+                        (direction == 1 && (s->mv & MV_B_BACK) && (frame->pict_type == AV_PICTURE_TYPE_B || frame->pict_type == AV_PICTURE_TYPE_NONE))) {
+                        if (s->visualization == VISUALIZATION_ARROW) {
+                            draw_arrow(frame->data[0], mv->dst_x, mv->dst_y, mv->src_x, mv->src_y,
+                                    frame->width, frame->height, frame->linesize[0],
+                                    100, 0, direction);
+                        }
+                        else if (s->visualization == VISUALIZATION_COLOR) {
+                            draw_motion_block(frame, mv->dst_x, mv->dst_y, mv->w, mv->h,
+                                        mv->dst_x - mv->src_x, mv->dst_y - mv->src_y);
+                        }
+                    }
+                }
             }
         }
     }
