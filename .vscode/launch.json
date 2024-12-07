@@ -8,6 +8,7 @@
             "name": "(Windows) Launch",
             "type": "cppvsdbg",
             "request": "launch",
+            "preLaunchTask": "ffmpeg-make",
             "program": "${workspaceFolder}/../../build/ffmpeg/ffmpeg.exe",
             "args": [
                 "-y", 

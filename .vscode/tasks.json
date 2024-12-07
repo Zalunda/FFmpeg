@@ -1,0 +1,28 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "ffmpeg-make",
+            "type": "shell",
+            "command": "\"\"D:\\Program Files\\Microsoft Visual Studio\\2022\\Enterprise\\VC\\Auxiliary\\Build\\vcvars64.bat\" && D:\\OthersPrograms\\msys64\\usr\\bin\\make.exe\"",
+            "options": {
+                "cwd": "${workspaceFolder}\\..\\..\\build\\ffmpeg",
+                "env": {
+                    "PATH": "D:/OthersPrograms/msys64/usr/bin;D:/OthersPrograms/msys64/usr/bin;D:/OthersPrograms/msys64/usr/bin;${env:PATH}"
+                }            
+            },
+            "windows": {
+                "options": {
+                    "shell": {
+                        "executable": "cmd.exe",
+                        "args": ["/d", "/c"]
+                    }
+                }
+            },
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            }
+        }
+    ]
+}

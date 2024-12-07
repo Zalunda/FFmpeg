@@ -1,3 +1,37 @@
 {
-    "makefile.configureOnOpen": true
+    "makefile.configureOnOpen": true,
+    "favorites.resources": [
+        {
+            "filePath": "libavfilter\\vf_codecview.c",
+            "group": "Default"
+        },
+        {
+            "filePath": "libavfilter\\vf_extract_mvs.c",
+            "group": "Default"
+        },
+        {
+            "filePath": ".vscode\\launch.json",
+            "group": "Default"
+        },
+        {
+            "filePath": ".vscode\\settings.json",
+            "group": "Default"
+        },
+        {
+            "filePath": "libavfilter\\vf_mestimate.c",
+            "group": "Default"
+        },
+        {
+            "filePath": "libavfilter\\motion_estimation.c",
+            "group": "Default"
+        },
+        {
+            "filePath": "libavfilter\\motion_estimation.h",
+            "group": "Default"
+        },
+        {
+            "filePath": ".vscode\\tasks.json",
+            "group": "Default"
+        }
+    ]
 }
