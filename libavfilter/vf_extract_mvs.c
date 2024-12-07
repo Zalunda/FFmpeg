@@ -65,11 +65,11 @@ static av_cold int init(AVFilterContext *ctx)
     avio_w8(s->io_ctx, (int8_t)s->format);
 
     if (s->format == FILE_FORMAT_RAW) {
-        int version = 1;
-        avio_w8(s->io_ctx, version);
+        int version_raw = 1;
+        avio_w8(s->io_ctx, version_raw);
     } else if (s->format == FILE_FORMAT_MATRIX) {
-        int version = 1;
-        avio_w8(s->io_ctx, version);
+        int version_matrix = 1;
+        avio_w8(s->io_ctx, version_matrix);
 
         // Write dummy values for video width, height, and nb_frames
         avio_wl16(s->io_ctx, 0);  // video_width
@@ -77,7 +77,10 @@ static av_cold int init(AVFilterContext *ctx)
         avio_wl32(s->io_ctx, 0);  // video_duration
         avio_wl32(s->io_ctx, 0);  // video_frame_rate
         avio_wl32(s->io_ctx, 0);  // nb_frames
-        avio_wl16(s->io_ctx, 0);  // block_size
+        avio_wl16(s->io_ctx, 0);  // block_size_x
+        avio_wl16(s->io_ctx, 0);  // block_size_y
+        avio_wl16(s->io_ctx, 0);  // sensor_size_x
+        avio_wl16(s->io_ctx, 0);  // sensor_size_y
         avio_wl16(s->io_ctx, 0);  // nb_blocks_x
         avio_wl16(s->io_ctx, 0);  // nb_blocks_y
 
@@ -197,6 +200,26 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *frame)
     return ff_filter_frame(ctx->outputs[0], frame);
 }
 
+static int normalize_frame_rate(int computed_rate) {
+    // Common frame rates * 100
+    const int known_rates[] = {
+        2397, 2400,   // 23.97, 24
+        2997, 3000,   // 29.97, 30
+        5994, 6000,   // 59.94, 60
+        11988, 12000  // 119.88, 120
+    };
+    
+    const int tolerance = 1;
+    
+    for (int i = 0; i < sizeof(known_rates) / sizeof(known_rates[0]); i++) {
+        if (abs(computed_rate - known_rates[i]) <= tolerance) {
+            return known_rates[i];
+        }
+    }
+    
+    return computed_rate;
+}
+
 static av_cold void uninit(AVFilterContext *ctx)
 {
     ExtractMVsContext *s = ctx->priv;
@@ -208,22 +231,24 @@ static av_cold void uninit(AVFilterContext *ctx)
 
     if (s->format == FILE_FORMAT_MATRIX && s->frame_number > 0) {
 
-        float x = s->last_pts / s->frame_number;
+        // Compute the video frame rate per 100 frames
+        int64_t video_duration_ms = av_rescale_q(s->last_pts, s->stream_time_base, av_make_q(1, 1000));
+        int video_frame_rate = (int)round((float)100 * 1000 / ((float)video_duration_ms / (s->frame_number - 1)));  // "frame_number - 1" because last_pts doesn't include the duration of the last frame
+        int normalized = normalize_frame_rate(video_frame_rate);
 
         // Seek back and update the values in the file
-
-        int64_t video_duration_ms = av_rescale_q(s->last_pts, s->stream_time_base, av_make_q(1, 1000));
-        int video_frame_rate = video_duration_ms * 1000 / s->frame_number;
-
         avio_seek(s->io_ctx, 6, SEEK_SET);
-        avio_wl16(s->io_ctx, s->video_width);
-        avio_wl16(s->io_ctx, s->video_height);
-        avio_wl32(s->io_ctx, video_duration_ms);
-        avio_wl32(s->io_ctx, video_frame_rate);
-        avio_wl32(s->io_ctx, s->frame_number);
-        avio_wl16(s->io_ctx, s->mb_size);
-        avio_wl16(s->io_ctx, s->nb_blocks_x);
-        avio_wl16(s->io_ctx, s->nb_blocks_y);
+        avio_wl16(s->io_ctx, s->video_width);       // video_width
+        avio_wl16(s->io_ctx, s->video_height);      // video_height
+        avio_wl32(s->io_ctx, video_duration_ms);    // video_duration
+        avio_wl32(s->io_ctx, video_frame_rate);     // video_frame_rate per 100 frames (ex. 5994 for 59.94)
+        avio_wl32(s->io_ctx, s->frame_number);      // nb_frames
+        avio_wl16(s->io_ctx, s->mb_size);           // block_size_x
+        avio_wl16(s->io_ctx, s->mb_size);           // block_size_y
+        avio_wl16(s->io_ctx, s->mb_size);           // sensor_size_x
+        avio_wl16(s->io_ctx, s->mb_size);           // sensor_size_y
+        avio_wl16(s->io_ctx, s->nb_blocks_x);       // nb_blocks_x
+        avio_wl16(s->io_ctx, s->nb_blocks_y);       // nb_blocks_y
     }
 
     avio_close(s->io_ctx);
