@@ -2,13 +2,63 @@
     "version": "2.0.0",
     "tasks": [
         {
+            "label": "ffmpeg-configure-debug",
+            "type": "shell",
+            "command": "\"\"D:\\Program Files\\Microsoft Visual Studio\\2022\\Enterprise\\VC\\Auxiliary\\Build\\vcvars64.bat\" && D:\\OthersPrograms\\msys64\\usr\\bin\\bash.exe \"..\\..\\sources\\ffmpeg\\configure\" --prefix=../../installed --toolchain=msvc --target-os=win64 --arch=x86_64 --disable-x86asm --disable-asm --disable-shared --enable-static --enable-libx264 --disable-protocol=rtmp --disable-protocol=rtmps --disable-protocol=rtmpt --disable-protocol=rtmpts --disable-doc --enable-gpl --enable-version3 --enable-debug --disable-optimizations --optflags=\"-Od -Zi\" --extra-ldflags=\"-LIBPATH:../../installed/lib\" --extra-cflags=\"-I../../installed/include/ -MTd\" --extra-cxxflags=\"-I../../installed/include/ -MTd\"\"",
+            "options": {
+                "cwd": "${workspaceFolder}\\..\\..\\build\\ffmpeg",
+                "env": {
+                    "PATH": "D:/OthersPrograms/msys64/usr/bin;${env:PATH}",
+                    "CC": "cl",
+                    "PKG_CONFIG_PATH": "../../installed/lib/pkgconfig"
+                }            
+            },
+            "windows": {
+                "options": {
+                    "shell": {
+                        "executable": "cmd.exe",
+                        "args": ["/d", "/c"]
+                    }
+                }
+            },
+            "group": {
+                "kind": "build",
+                "isDefault": false
+            }
+        },
+        {
+            "label": "ffmpeg-configure-release",
+            "type": "shell",
+            "command": "\"\"D:\\Program Files\\Microsoft Visual Studio\\2022\\Enterprise\\VC\\Auxiliary\\Build\\vcvars64.bat\" && D:\\OthersPrograms\\msys64\\usr\\bin\\bash.exe \"..\\..\\sources\\ffmpeg\\configure\" --prefix=../../installed --toolchain=msvc --target-os=win64 --arch=x86_64 --disable-x86asm --disable-asm --disable-shared --enable-static --enable-libx264 --disable-protocol=rtmp --disable-protocol=rtmps --disable-protocol=rtmpt --disable-protocol=rtmpts --disable-doc --enable-gpl --enable-version3 --extra-ldflags=\"-LIBPATH:../../installed/lib\" --extra-cflags=\"-I../../installed/include/ -MTd\" --extra-cxxflags=\"-I../../installed/include/ -MTd\"\"",
+            "options": {
+                "cwd": "${workspaceFolder}\\..\\..\\build\\ffmpeg",
+                "env": {
+                    "PATH": "D:/OthersPrograms/msys64/usr/bin;${env:PATH}",
+                    "CC": "cl",
+                    "PKG_CONFIG_PATH": "../../installed/lib/pkgconfig"
+                }            
+            },
+            "windows": {
+                "options": {
+                    "shell": {
+                        "executable": "cmd.exe",
+                        "args": ["/d", "/c"]
+                    }
+                }
+            },
+            "group": {
+                "kind": "build",
+                "isDefault": false
+            }
+        },
+        {
             "label": "ffmpeg-make",
             "type": "shell",
             "command": "\"\"D:\\Program Files\\Microsoft Visual Studio\\2022\\Enterprise\\VC\\Auxiliary\\Build\\vcvars64.bat\" && D:\\OthersPrograms\\msys64\\usr\\bin\\make.exe\"",
             "options": {
                 "cwd": "${workspaceFolder}\\..\\..\\build\\ffmpeg",
                 "env": {
-                    "PATH": "D:/OthersPrograms/msys64/usr/bin;D:/OthersPrograms/msys64/usr/bin;D:/OthersPrograms/msys64/usr/bin;${env:PATH}"
+                    "PATH": "D:/OthersPrograms/msys64/usr/bin;${env:PATH}"
                 }            
             },
             "windows": {
