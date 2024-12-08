@@ -363,6 +363,7 @@ extern const AVFilter ff_vf_mcdeint;
 extern const AVFilter ff_vf_median;
 extern const AVFilter ff_vf_mergeplanes;
 extern const AVFilter ff_vf_mestimate;
+extern const AVFilter ff_vf_mestimate2;
 extern const AVFilter ff_vf_metadata;
 extern const AVFilter ff_vf_midequalizer;
 extern const AVFilter ff_vf_minterpolate;
