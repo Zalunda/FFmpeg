@@ -29,20 +29,6 @@ static const int8_t hex4[16][2] = {{-4,-2}, {-4,-1}, {-4, 0}, {-4, 1}, {-4, 2},
                                    { 4,-2}, { 4,-1}, { 4, 0}, { 4, 1}, { 4, 2},
                                    {-2, 3}, { 0, 4}, { 2, 3}, {-2,-3}, { 0,-4}, { 2,-3}};
 
-#define COST_MV(x, y)\
-do {\
-    cost = me_ctx->get_cost(me_ctx, x_mb, y_mb, x, y);\
-    if (cost < cost_min) {\
-        cost_min = cost;\
-        mv[0] = x;\
-        mv[1] = y;\
-    }\
-} while(0)
-
-#define COST_P_MV(x, y)\
-if (x >= x_min && x <= x_max && y >= y_min && y <= y_max)\
-    COST_MV(x, y);
-
 void ff_me_init_context2(AVMotionEstContext2 *me_ctx, int mb_size, int search_param,
                         int width, int height, int x_min, int x_max, int y_min, int y_max)
 {
@@ -50,14 +36,14 @@ void ff_me_init_context2(AVMotionEstContext2 *me_ctx, int mb_size, int search_pa
     me_ctx->height = height;
     me_ctx->mb_size = mb_size;
     me_ctx->search_param = search_param;
-    me_ctx->get_cost = &ff_me_cmp_sad;
+    me_ctx->get_cost = &ff_me_cmp_sad2;
     me_ctx->x_min = x_min;
     me_ctx->x_max = x_max;
     me_ctx->y_min = y_min;
     me_ctx->y_max = y_max;
 }
 
-uint64_t ff_me_cmp_sad2(AVMotionEstContext2 *me_ctx, int x_mb, int y_mb, int x_mv, int y_mv)
+uint32_t ff_me_cmp_sad2(AVMotionEstContext2 *me_ctx, int x_mb, int y_mb, int x_mv, int y_mv)
 {
     const int linesize = me_ctx->linesize;
     uint8_t *data_ref = me_ctx->data_ref;
@@ -75,34 +61,78 @@ uint64_t ff_me_cmp_sad2(AVMotionEstContext2 *me_ctx, int x_mb, int y_mb, int x_m
     return sad;
 }
 
-uint64_t ff_me_search_tdls2(AVMotionEstContext2 *me_ctx, int x_mb, int y_mb, int *mv)
+uint32_t ff_me_search_tdls2(AVMotionEstContext2 *me_ctx, int x_mb, int y_mb, int *mv)
 {
-    int x, y;
     int x_min = FFMAX(me_ctx->x_min, x_mb - me_ctx->search_param);
     int y_min = FFMAX(me_ctx->y_min, y_mb - me_ctx->search_param);
     int x_max = FFMIN(x_mb + me_ctx->search_param, me_ctx->x_max);
     int y_max = FFMIN(y_mb + me_ctx->search_param, me_ctx->y_max);
-    uint64_t cost, cost_min;
+
+    uint32_t cost;
     int step = ROUNDED_DIV(me_ctx->search_param, 2);
-    int i;
+    uint32_t highest_costs[5] = {0, 0, 0, 0, 0};
+    int cost_count = 0;
 
     mv[0] = x_mb;
     mv[1] = y_mb;
+    mv[2] = UINT32_MAX;
 
-    if (!(cost_min = me_ctx->get_cost(me_ctx, x_mb, y_mb, x_mb, y_mb)))
-        return cost_min;
+    highest_costs[0] = me_ctx->get_cost(me_ctx, x_mb, y_mb, mv[0], mv[1]);
 
     do {
-        x = mv[0];
-        y = mv[1];
+        int base_x = mv[0];
+        int base_y = mv[1];
 
-        for (i = 0; i < 4; i++)
-            COST_P_MV(x + dia1[i][0] * step, y + dia1[i][1] * step);
+        for (int i = 0; i < 4; i++)
+        {
+            int x = base_x + dia1[i][0] * step;
+            int y = base_y + dia1[i][1] * step;
 
-        if (x == mv[0] && y == mv[1])
+            if (x >= x_min && x <= x_max && y >= y_min && y <= y_max)
+            {
+                cost = me_ctx->get_cost(me_ctx, x_mb, y_mb, x, y);
+                if (cost < mv[2]) {
+                    mv[0] = x;
+                    mv[1] = y;
+                    mv[2] = cost;
+                }
+
+                if (cost < highest_costs[4]) {
+                    // Cost is too low to be in top 5, skip rest of comparisons
+                } else if (cost < highest_costs[3]) {
+                    highest_costs[4] = cost;
+                } else if (cost < highest_costs[2]) {
+                    highest_costs[4] = highest_costs[3];
+                    highest_costs[3] = cost;
+                } else if (cost < highest_costs[1]) {
+                    highest_costs[4] = highest_costs[3];
+                    highest_costs[3] = highest_costs[2];
+                    highest_costs[2] = cost;
+                } else if (cost < highest_costs[0]) {
+                    highest_costs[4] = highest_costs[3];
+                    highest_costs[3] = highest_costs[2];
+                    highest_costs[2] = highest_costs[1];
+                    highest_costs[1] = cost;
+                } else {
+                    highest_costs[4] = highest_costs[3];
+                    highest_costs[3] = highest_costs[2];
+                    highest_costs[2] = highest_costs[1];
+                    highest_costs[1] = highest_costs[0];
+                    highest_costs[0] = cost;
+                }
+            }
+        }
+
+        if (base_x == mv[0] && base_y == mv[1])
             step = step >> 1;
 
     } while (step > 0);
 
-    return cost_min;
+    mv[3] = (highest_costs[0] + highest_costs[1] + highest_costs[2] + highest_costs[3] + highest_costs[4]) / 5;
+    if (mv[2] > 0 && (x_mb - mv[0] != 0 || y_mb - mv[1] != 0))
+    {
+        int k = 0;
+    }
+
+    return mv[2];
 }

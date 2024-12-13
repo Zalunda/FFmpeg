@@ -11,26 +11,34 @@
             "preLaunchTask": "ffmpeg-make",
             "program": "${workspaceFolder}/../../build/ffmpeg/ffmpeg.exe",
             "args": [
-                "-y", 
-                // "-flags2", 
-                // "+export_mvs", 
+                "-y",
+                // "-flags2",
+                // "+export_mvs",
                 //"-ss", "15",
-                "-i", "E:\\Sources.zalunda\\ffmpeg-DEV\\TestFile.mp4",
+                "-t", "1.00",
+                "-i", "TestFile.mp4",
                 //"-filter_complex", "[0:v]crop=in_w/2[A];[0:v]crop=in_w/2[B];[A][B]hstack=inputs=2,mestimate=tdls:mb_size=32:search_param=7:onlyprev=1,extract_mvs=filename=toto.mvs:mb_size=32,codecview=mv=pf+bf+bb[v]",
                 //"-filter_complex", "mestimate=tdls:mb_size=8:search_param=7:onlyprev=1,extract_mvs=filename=toto.mvs:mb_size=8,codecview=mv=pf+bf+bb[v]",
-                //"-filter_complex", "[0:v]v360=input=he:in_stereo=sbs:pitch=-25:yaw=0:roll=0:output=flat:d_fov=120:w=2048:h=2048[A];[A]mestimate=tdls:mb_size=8:search_param=7:onlyprev=1,extract_mvs=filename=toto.mvs:mb_size=8,codecview=mv=pf+bf+bb[v]",
-                "-filter_complex", "[0:v]v360=input=he:in_stereo=sbs:pitch=-25:yaw=0:roll=0:output=flat:d_fov=120:w=2048:h=2048[A];[A]mestimate2=mb_size=8,extract_mvs=filename=toto.mvs:mb_size=8,codecview=mv=pf+bf+bb:visualization=color[v]",
-                "-map", "[v]",
-                "-map", "0:a",
-                "-g", "1", 
-                "-c:a", "copy",
+                //"-filter_complex", "[0:v]mestimate=esa:mb_size=16:search_param=7:onlyprev=1,extract_mvs=filename=toto.mvs:mb_size=16,codecview=mv=pf+bf+bb:visualization=arrow",
+                "-filter_complex", "[0:v]v360=input=he:in_stereo=sbs:pitch=-25:yaw=0:roll=0:output=flat:d_fov=120:w=2048:h=2048[A];[A]mestimate=esa:mb_size=8:search_param=7:onlyprev=1,extract_mvs=filename=toto.mvs:mb_size=8,codecview=mv=pf+bf+bb:visualization=color",
+                //"-filter_complex", "[0:v]v360=input=he:in_stereo=sbs:pitch=-25:yaw=0:roll=0:output=flat:d_fov=120:w=2048:h=2048[A];[A]mestimate2=mb_size=8,extract_mvs=filename=toto.mvs:mb_size=8,codecview=mv=pf+bf+bb:visualization=color[v]",
+                //"-filter_complex", "[0:v]v360=input=he:in_stereo=sbs:pitch=-25:yaw=0:roll=0:output=flat:d_fov=120:w=2048:h=2048[A];[A]mestimate2=mb_size=16,extract_mvs=filename=toto.mvs:mb_size=16,codecview=mv=pf+bf+bb:visualization=arrow",
+                //"-map", "[v]",
+                //"-map", "0:a",
                 "-threads", "32",
-                "-crf", "0",
+                "-c:a", "copy",
+
+                //"-g", "1",
+                //"-crf", "0",
+                // "TestFile-Result.mp4",
+
+                "-f", "image2",    // Force image2 format
+                "Images\\output_%04d.jpg"  // Pattern for numbered output
+
                 // "-f", "null", "-"
-                "E:\\Sources.zalunda\\ffmpeg-DEV\\TestFile-Result.mp4"
             ],
             "stopAtEntry": false,
-            "cwd": "E:\\Sources.zalunda\\ffmpeg-DEV", // "${fileDirname}"
+            "cwd": "E:\\Sources.zalunda\\ffmpeg-DEV\\WorkingFolder", // "${fileDirname}"
             "environment": [],
             "console": "internalConsole" // "internalConsole"
         }
