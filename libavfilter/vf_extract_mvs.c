@@ -11,27 +11,51 @@ typedef enum {
     FILE_FORMAT_MATRIX = 2,
 } FileFormat;
 
+typedef struct {
+    uint16_t angle;
+    uint8_t length;
+} VectorMetrics;
+
 typedef struct CellMetrics CellMetrics;
+
+typedef enum {
+    CELL_STATE_DONE = 0,
+    CELL_STATE_TO_SCAN = 1,
+    CELL_STATE_TODO = 2,
+} CellState;
+
+typedef struct {
+    int is_final;
+    int group_id;
+    int initial_angle;
+    int real_angle;
+    int nb_cells;
+    int total_x;
+    int total_y;
+    int total_motion_x;
+    int total_motion_y;
+
+    uint64_t bucket_bits;
+} GroupStats;
 
 typedef struct CellMetrics {
     int index_column;
     int index_row;
     int x;
     int y;
+    int random_value;
+    CellMetrics *neighbours[9];
 
     int motion_x;
     int motion_y;
+    VectorMetrics vm;
+    int bucket_index;
+    uint64_t bucket_bit;
+    GroupStats *in_group;
 
-    CellMetrics *neighbours[9];
-    uint32_t nb_similar_nearby;
-    int group_id;
+    CellState state;
+    //int group_id;
 } CellMetrics;
-
-typedef struct {
-    float cos_angle;
-    float sin_angle;
-    uint8_t length;    // normalized length 0-255
-} VectorMetrics;
 
 typedef struct {
     const AVClass *class;
@@ -51,6 +75,10 @@ typedef struct {
     int nb_rows;
     int nb_cells;
     CellMetrics *cells_metrics;
+    CellMetrics **cells_metrics_sorted;
+    CellMetrics **cells_metrics_queue;
+    GroupStats *groups_stats;
+    GroupStats **groups_stats_sorted;
 
     VectorMetrics vector_lookup[256][256];
 } ExtractMVsContext;
@@ -77,24 +105,20 @@ static void init_vector_lookup(ExtractMVsContext *s) {
             float angle = atan2f(my, mx) * 180.0f / M_PI;
             if(angle < 0) angle += 360.0f;
 
-
             // Calculate length (normalized to 0-255)
             float raw_length = sqrtf(mx*mx + my*my);
             uint8_t norm_length = raw_length > 255 ? 255 : (uint8_t)raw_length;
 
-            float angle_rad = atan2f(my, mx);
-            s->vector_lookup[idx_y][idx_x].cos_angle = cosf(angle_rad);
-            s->vector_lookup[idx_y][idx_x].sin_angle = sinf(angle_rad);
-            s->vector_lookup[idx_y][idx_x].length = norm_length;
+            s->vector_lookup[idx_x][idx_y].angle = angle;
+            s->vector_lookup[idx_x][idx_y].length = norm_length;
         }
     }
 }
 
-static inline VectorMetrics get_vector_metrics(const ExtractMVsContext *s, const CellMetrics *cell) {
-    int idx_x = cell->motion_x + 127;
-    int idx_y = cell->motion_y + 127;
-    VectorMetrics vm = s->vector_lookup[idx_x][idx_y];
-    return vm;
+static inline VectorMetrics get_vector_metrics(const ExtractMVsContext *s, const int motion_x, const int motion_y) {
+    int idx_x = motion_x + 127;
+    int idx_y = motion_y + 127;
+    return s->vector_lookup[idx_x][idx_y];
 }
 
 static av_cold int init(AVFilterContext *ctx)
@@ -143,152 +167,6 @@ static av_cold int init(AVFilterContext *ctx)
     return 0;
 }
 
-static inline int is_similar_motion(const ExtractMVsContext *s,
-                                  const CellMetrics *cell1,
-                                  const CellMetrics *cell2,
-                                  int angle_accepted,
-                                  int minimum_length)
-{
-    VectorMetrics vm1 = get_vector_metrics(s, cell1);
-    VectorMetrics vm2 = get_vector_metrics(s, cell2);
-
-    if (vm1.length < minimum_length || vm2.length < minimum_length)
-        return 0;
-
-    // Dot product gives us cosine of angle between vectors
-    float dot = vm1.cos_angle * vm2.cos_angle +
-                vm1.sin_angle * vm2.sin_angle;
-
-    // Convert angle_accepted to cosine threshold
-    float cos_threshold = cosf(angle_accepted * M_PI / 180.0f);
-
-    return dot >= cos_threshold;
-}
-
-static uint32_t compute_nb_similar_nearby(const ExtractMVsContext *s, const CellMetrics *cell, int angle_accepted, int minimum_length) {
-    uint32_t similar_count = 0;
-
-    // Iterate through the neighbour array until we hit NULL
-    for (int i = 0; cell->neighbours[i] != NULL; i++) {
-        if (is_similar_motion(s, cell, cell->neighbours[i], angle_accepted, minimum_length)) {
-            similar_count++;
-        }
-    }
-    if (similar_count > 5)
-    {
-        int k = 0;
-    }
-    return similar_count;
-}
-
-typedef struct {
-    int group_id;
-    int nb_cells;
-    double sum_cos;
-    double sum_sin;
-    int total_x;
-    int total_y;
-} GroupStats;
-
-static CellMetrics *find_best_initial_cell(ExtractMVsContext *s, int angle_accepted, int minimum_length) {
-    int max_similar = 5;
-    float max_coherence = -1.0f;  // Changed from min_angle_range
-    CellMetrics *best_cell = NULL;
-    int best_length = 0;
-
-    for (int i = 0; i < s->nb_cells; i++) {
-        CellMetrics *current = &s->cells_metrics[i];
-        if (current->group_id != 0 || current->nb_similar_nearby < max_similar)
-            continue;
-
-        VectorMetrics current_vm = get_vector_metrics(s, current);
-        if (current_vm.length < minimum_length)
-            continue;
-
-        // Sum of vector components for coherence calculation
-        float sum_cos = current_vm.cos_angle;
-        float sum_sin = current_vm.sin_angle;
-        int nb_acceptable = 1;  // Include current cell
-
-        for (int j = 0; current->neighbours[j] != NULL; j++) {
-            if (current->group_id == 0 &&
-                is_similar_motion(s, current, current->neighbours[j], angle_accepted, minimum_length)) {
-                VectorMetrics vm = get_vector_metrics(s, current->neighbours[j]);
-                sum_cos += vm.cos_angle;
-                sum_sin += vm.sin_angle;
-                nb_acceptable++;
-            }
-        }
-
-        // Calculate coherence as the length of the mean vector
-        float coherence = sqrtf(sum_cos * sum_cos + sum_sin * sum_sin) / nb_acceptable;
-
-        if (nb_acceptable > max_similar ||
-            (nb_acceptable == max_similar && coherence > max_coherence)) {
-            max_similar = nb_acceptable;
-            max_coherence = coherence;
-            best_cell = current;
-            best_length = current_vm.length;
-        }
-    }
-
-    return best_cell;
-}
-
-static void process_group(ExtractMVsContext *s, CellMetrics *start_cell, GroupStats *stats, int minimum_length) {
-    // Mark and process the start cell first
-    start_cell->group_id = stats->group_id;
-
-    VectorMetrics vm = get_vector_metrics(s, start_cell);
-    stats->nb_cells++;
-    stats->sum_cos += vm.cos_angle;
-    stats->sum_sin += vm.sin_angle;
-    stats->total_x += start_cell->x;
-    stats->total_y += start_cell->y;
-
-    // Calculate angle boundaries
-    float mean_angle_rad = atan2f(stats->sum_sin, stats->sum_cos);
-    if (mean_angle_rad < -M_PI) mean_angle_rad += 2 * M_PI;
-    else if (mean_angle_rad > M_PI) mean_angle_rad -= 2 * M_PI;
-    float angle_range_rad = 60.0f * M_PI / 180.0f;
-
-    float cos_min = cosf(mean_angle_rad - angle_range_rad);
-    float sin_min = sinf(mean_angle_rad - angle_range_rad);
-    float cos_max = cosf(mean_angle_rad + angle_range_rad);
-    float sin_max = sinf(mean_angle_rad + angle_range_rad);
-
-    // Collect valid neighbors first (max 8 neighbors as seen in context)
-    CellMetrics *valid_neighbors[9] = {NULL};  // 9th element as sentinel
-    int valid_count = 0;
-
-    for (int i = 0; start_cell->neighbours[i] != NULL; i++) {
-        CellMetrics *neighbor = start_cell->neighbours[i];
-
-        if (neighbor->group_id != 0)
-            continue;
-
-        VectorMetrics vm_n = get_vector_metrics(s, neighbor);
-        if (vm_n.length < minimum_length)
-            continue;
-
-        float cross1 = vm_n.cos_angle * sin_min - vm_n.sin_angle * cos_min;
-        float cross2 = vm_n.cos_angle * sin_max - vm_n.sin_angle * cos_max;
-
-        if (cross1 * cross2 <= 0) {
-            // Mark the neighbor immediately
-            neighbor->group_id = stats->group_id;
-            valid_neighbors[valid_count++] = neighbor;
-            if (valid_count >= 8) break;  // Safety check
-        }
-    }
-    valid_neighbors[valid_count] = NULL;  // Null terminator
-
-    // Now recursively process the pre-validated neighbors
-    for (int i = 0; valid_neighbors[i] != NULL; i++) {
-        process_group(s, valid_neighbors[i], stats, minimum_length);
-    }
-}
-
 static void draw_circle(AVFrame *frame, float cx, float cy, float radius, uint8_t color[4]) {
     uint8_t *data = frame->data[0];
     int linesize = frame->linesize[0];
@@ -301,7 +179,7 @@ static void draw_circle(AVFrame *frame, float cx, float cy, float radius, uint8_
     int err = 0;
 
     while (x >= y) {
-        // Draw 8 points of the circle
+        // Draw 8 points of the circle with thickness
         int points[][2] = {
             {cx + x, cy + y}, {cx + y, cy + x},
             {cx - y, cy + x}, {cx - x, cy + y},
@@ -310,10 +188,15 @@ static void draw_circle(AVFrame *frame, float cx, float cy, float radius, uint8_
         };
 
         for (int i = 0; i < 8; i++) {
-            int px = points[i][0];
-            int py = points[i][1];
-            if (px >= 0 && px < width && py >= 0 && py < height) {
-                data[py * linesize + px] = color[0]; // Using first color component
+            // Draw a 3x3 square around each point
+            for (int dy = -1; dy <= 2; dy++) {
+                for (int dx = -1; dx <= 2; dx++) {
+                    int px = points[i][0] + dx;
+                    int py = points[i][1] + dy;
+                    if (px >= 0 && px < width && py >= 0 && py < height) {
+                        data[py * linesize + px] = color[0];
+                    }
+                }
             }
         }
 
@@ -326,29 +209,232 @@ static void draw_circle(AVFrame *frame, float cx, float cy, float radius, uint8_
     }
 }
 
-void draw_motion_group(AVFrame *frame, GroupStats stats, int mb_size, uint8_t color[4]) {
-    float center_x = stats.total_x / stats.nb_cells;
-    float center_y = stats.total_y / stats.nb_cells;
-    float mean_angle = atan2f(stats.sum_sin, stats.sum_cos) * 180.0f / M_PI;
-    if (mean_angle < 0) mean_angle += 360.0f;
+static int clip_line(int *sx, int *sy, int *ex, int *ey, int maxx)
+{
+    if (*sx > *ex) {
+        // Swap points if start x is greater than end x
+        int tmp;
+        tmp = *sx; *sx = *ex; *ex = tmp;
+        tmp = *sy; *sy = *ey; *ey = tmp;
+    }
+
+    // Clip against x = 0
+    if (*sx < 0) {
+        if (*ex < 0)
+            return 1;  // Line completely outside
+        *sy = *sy + (*ey - *sy) * (0 - *sx) / (*ex - *sx);
+        *sx = 0;
+    }
+
+    // Clip against x = maxx
+    if (*ex > maxx) {
+        if (*sx > maxx)
+            return 1;  // Line completely outside
+        *ey = *sy + (*ey - *sy) * (maxx - *sx) / (*ex - *sx);
+        *ex = maxx;
+    }
+
+    return 0;  // Line (partially) inside
+}
+
+static void draw_line(uint8_t *buf, int sx, int sy, int ex, int ey,
+                     int w, int h, ptrdiff_t stride, int color)
+{
+    // First clip the line to the frame boundaries
+    if (clip_line(&sx, &sy, &ex, &ey, w - 1))
+        return;
+    if (clip_line(&sy, &sx, &ey, &ex, h - 1))
+        return;
+
+    // Bresenham algorithm implementation
+    int dx = abs(ex - sx);
+    int dy = abs(ey - sy);
+    int step_x = sx < ex ? 1 : -1;
+    int step_y = sy < ey ? 1 : -1;
+    int err = dx - dy;
+
+    while (1) {
+        // Draw the current pixel
+        buf[sy * stride + sx] = color;
+
+        // Check if we reached the end point
+        if (sx == ex && sy == ey)
+            break;
+
+        int e2 = 2 * err;
+        if (e2 > -dy) {
+            err -= dy;
+            sx += step_x;
+        }
+        if (e2 < dx) {
+            err += dx;
+            sy += step_y;
+        }
+    }
+}
+
+static void draw_arrow(AVFrame *frame, float sx, float sy, float ex, float ey, uint8_t color[4]) {
+    uint8_t *data = frame->data[0];
+    int linesize = frame->linesize[0];
+    int width = frame->width;
+    int height = frame->height;
+
+    // Draw main line (5 pixels wide)
+    float dx = ex - sx;
+    float dy = ey - sy;
+    float length = sqrtf(dx * dx + dy * dy);
+    float nx = -dy / length;  // normalized perpendicular vector
+    float ny = dx / length;
+
+    // Draw multiple parallel lines to create thickness
+    for (int i = -2; i <= 2; i++) {
+        float offset_x = nx * i;
+        float offset_y = ny * i;
+
+        float start_x = sx + offset_x;
+        float start_y = sy + offset_y;
+        float end_x = ex + offset_x;
+        float end_y = ey + offset_y;
+
+        // Draw the line using Bresenham-like algorithm from draw_line
+        int x0 = roundf(start_x);
+        int y0 = roundf(start_y);
+        int x1 = roundf(end_x);
+        int y1 = roundf(end_y);
+
+        int dx = abs(x1 - x0);
+        int dy = abs(y1 - y0);
+        int sx = x0 < x1 ? 1 : -1;
+        int sy = y0 < y1 ? 1 : -1;
+        int err = dx - dy;
+
+        while (1) {
+            if (x0 >= 0 && x0 < width && y0 >= 0 && y0 < height) {
+                data[y0 * linesize + x0] = color[0];
+            }
+
+            if (x0 == x1 && y0 == y1) break;
+
+            int e2 = 2 * err;
+            if (e2 > -dy) {
+                err -= dy;
+                x0 += sx;
+            }
+            if (e2 < dx) {
+                err += dx;
+                y0 += sy;
+            }
+        }
+    }
+
+    // Draw arrowhead
+    float angle = atan2f(dy, dx);
+    float arrow_length = 20.0f;
+    float arrow_angle = M_PI / 6.0f; // 30 degrees
+
+    // Draw left side of arrowhead
+    float arrow_x1 = ex - arrow_length * cosf(angle + arrow_angle);
+    float arrow_y1 = ey - arrow_length * sinf(angle + arrow_angle);
+    draw_line(frame->data[0], ex, ey, arrow_x1, arrow_y1, width, height, linesize, color[0]);
+
+    // Draw right side of arrowhead
+    float arrow_x2 = ex - arrow_length * cosf(angle - arrow_angle);
+    float arrow_y2 = ey - arrow_length * sinf(angle - arrow_angle);
+    draw_line(frame->data[0], ex, ey, arrow_x2, arrow_y2, width, height, linesize, color[0]);
+}
+
+void draw_motion_group(AVFrame *frame, GroupStats *group, int mb_size, uint8_t color[4]) {
+    float center_x = group->total_x / group->nb_cells;
+    float center_y = group->total_y / group->nb_cells;
 
     // Calculate size
-    float area = stats.nb_cells * mb_size * mb_size;
+    float area = group->nb_cells * mb_size * mb_size;
     float radius = sqrtf(area / M_PI);
 
     // Draw main circle
     draw_circle(frame, center_x, center_y, radius, color);
 
     // Draw direction indicator
-    // float arrow_length = radius * 1.5f;
-    // float end_x = center_x + cosf(mean_angle * M_PI / 180.0f) * arrow_length;
-    // float end_y = center_y + sinf(mean_angle * M_PI / 180.0f) * arrow_length;
-    // draw_arrow(frame, center_x, center_y, end_x, end_y, color);
+    float arrow_length = radius * 1.5f;
+    float end_x = center_x + cosf(group->real_angle * M_PI / 180.0f) * arrow_length;
+    float end_y = center_y + sinf(group->real_angle * M_PI / 180.0f) * arrow_length;
+    draw_arrow(frame, center_x, center_y, end_x, end_y, color);
 
     // Optionally draw text with stats
     // char text[64];
     // snprintf(text, sizeof(text), "n=%d a=%.1f", stats.nb_cells, mean_angle);
     // draw_text(frame, center_x, center_y - radius, text, color);
+}
+
+// We'll need this as a global or static variable in the filter context
+static uint64_t g_best_bucket_bits;
+
+// Comparison function for qsort
+static int compare_cells(const void *a, const void *b) {
+    const CellMetrics *cell1 = *(const CellMetrics **)a;
+    const CellMetrics *cell2 = *(const CellMetrics **)b;
+
+    // First priority: state
+    if (cell1->state != cell2->state)
+        return cell2->state - cell1->state;
+
+    // Second priority: cells with matching bucket_bit
+    int cell1_matches = (cell1->bucket_bit & g_best_bucket_bits) != 0;
+    int cell2_matches = (cell2->bucket_bit & g_best_bucket_bits) != 0;
+    if (cell1_matches != cell2_matches)
+        return cell2_matches - cell1_matches;
+
+    return cell1->random_value - cell2->random_value;
+}
+
+static void process_group(ExtractMVsContext *s, CellMetrics *start_cell, GroupStats *group) {
+    // Use a queue to store cells to process
+    int queue_start = 0;
+    int queue_end = 0;
+
+    // Add the start cell to the queue
+    s->cells_metrics_queue[queue_end++] = start_cell;
+    start_cell->in_group = group;
+
+    while (queue_start < queue_end) {
+        CellMetrics *current = s->cells_metrics_queue[queue_start++];
+
+        // Update group statistics
+        group->nb_cells++;
+        group->total_x += current->x;
+        group->total_y += current->y;
+        group->total_motion_x += current->motion_x;
+        group->total_motion_y += current->motion_y;
+
+        // Check all neighbors
+        for (int i = 0; current->neighbours[i] != NULL; i++) {
+            CellMetrics *neighbor = current->neighbours[i];
+
+            // Skip if already processed or being processed
+            if ((neighbor->state == CELL_STATE_DONE) || neighbor->in_group)
+                continue;
+
+            // Check if neighbor's motion matches our bucket criteria
+            if ((neighbor->bucket_bit & group->bucket_bits) == 0)
+                continue;
+
+            // Add to queue
+            neighbor->in_group = group;
+            s->cells_metrics_queue[queue_end++] = neighbor;
+        }
+    }
+}
+
+// Comparison function for group sorting
+static int compare_groups(const void *a, const void *b) {
+    const GroupStats *group1 = *(const GroupStats **)a;
+    const GroupStats *group2 = *(const GroupStats **)b;
+
+    if (group1->is_final != group1->is_final)
+        return group1->is_final - group2->is_final;
+
+    // Sort by number of cells (descending order)
+    return group2->nb_cells - group1->nb_cells;
 }
 
 static int filter_frame(AVFilterLink *inlink, AVFrame *frame)
@@ -389,15 +475,37 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *frame)
 
             // Allocate the motion vector cells
             s->cells_metrics = av_calloc(s->nb_cells, sizeof(CellMetrics));
+            if (!s->cells_metrics)
+                return AVERROR(ENOMEM);
+
+            s->cells_metrics_sorted = av_malloc(sizeof(CellMetrics *) * s->nb_cells);
+            if (!s->cells_metrics_sorted)
+                return AVERROR(ENOMEM);
+
+            s->cells_metrics_queue = av_malloc(sizeof(CellMetrics *) * s->nb_cells);
+            if (!s->cells_metrics_queue)
+                return AVERROR(ENOMEM);
+
+            s->groups_stats = av_malloc(sizeof(GroupStats) * s->nb_cells); // TODO: Overkill number but safe
+            if (!s->groups_stats)
+                return AVERROR(ENOMEM);
+
+            s->groups_stats_sorted = av_malloc(sizeof(GroupStats *) * s->nb_cells); // TODO: Overkill number but safe
+            if (!s->groups_stats_sorted)
+                return AVERROR(ENOMEM);
+
 
             for (int i = 0; i < s->nb_cells; i++) {
                 CellMetrics *current = &s->cells_metrics[i];
+                s->cells_metrics_sorted[i] = current;
+
                 current->index_row = i / s->nb_columns;
                 current->index_column = i % s->nb_columns;
                 current->x = current->index_column * s->mb_size;
                 current->y = current->index_row * s->mb_size;
                 current->motion_x = 0;
                 current->motion_y = 0;
+                current->random_value = current->index_row * 31 + current->index_column * 17 % 1000;
 
                 int index = 0;
                 for (int orow = -1; orow <= 1; orow++) {
@@ -416,13 +524,6 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *frame)
             }
         }
 
-        // Clear the motion vector array before each frame
-        for (int i = 0; i < s->nb_cells; i++) {
-            CellMetrics *current = &s->cells_metrics[i];
-            current->motion_x = 0;
-            current->motion_y = 0;
-        }
-
         // Get the frame timestamp in milliseconds
         int64_t timestamp_ms = av_rescale_q(frame->pts, inlink->time_base, av_make_q(1, 1000));
 
@@ -436,6 +537,13 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *frame)
             const AVMotionVector* mvs = (const AVMotionVector*)sd->data;
             int nb_mvs = (int)sd->size / sizeof(*mvs);
 
+            for (int i = 0; i < s->nb_cells; i++) {
+                CellMetrics *current = &s->cells_metrics[i];
+                current->motion_x = 0;
+                current->motion_y = 0;
+            }
+
+            // Place the motion vector in the corresponding cell
             for (int i = 0; i < nb_mvs; i++) {
                 int block_center_x = mvs[i].dst_x;
                 int block_center_y = mvs[i].dst_y;
@@ -473,53 +581,187 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *frame)
                 }
             }
 
-            int angle_accepted = 100;
-            int minimum_speed = 2;
+            // Write the motion vector array
             int mb_size_squared = s->mb_size * s->mb_size;
-            for (int i = 0; i < s->nb_cells; i++) {
-                CellMetrics *current = &s->cells_metrics[i];
+            for (int index = 0; index < s-> nb_cells; index++)
+            {
+                CellMetrics *current = &s->cells_metrics[index];
                 current->motion_x = current->motion_x / mb_size_squared;
                 current->motion_y = current->motion_y / mb_size_squared;
-                current->nb_similar_nearby = compute_nb_similar_nearby(s, current, angle_accepted, minimum_speed);
+                avio_w8(s->io_ctx, current->motion_x);
+                avio_w8(s->io_ctx, current->motion_y);
             }
 
+            // --------------- Start of post-processing
+            int minimum_length = 1; // 1 or more? TO VALIDATE LATER
+
+            for (int i = 0; i < s->nb_cells; i++) {
+                CellMetrics *current = &s->cells_metrics[i];
+                current->vm = get_vector_metrics(s, current->motion_x, current->motion_y);
+                current->bucket_index = ((current->vm.angle - 5 + 360) % 360) / 10; // TODO validate this. I want the block 0 to be from '355 to 5'.
+                current->bucket_bit = (uint64_t)1 << current->bucket_index;
+                if (current->vm.length < minimum_length) {
+                    current->state = CELL_STATE_DONE;
+                } else {
+                    current->state = CELL_STATE_TODO;
+                }
+                current->in_group = NULL;
+            }
+
+            int current_group_index = 0;
             int current_group_id = 1;
-            int minimum_length = 3;
-            CellMetrics *best_cell;
-            while (best_cell = find_best_initial_cell(s, angle_accepted, minimum_length))
-            {
-                GroupStats stats = {
-                    .group_id = current_group_id++,
-                    .sum_cos = 0,
-                    .sum_sin = 0,
-                    .nb_cells = 0,
-                    .total_x = 0,
-                    .total_y = 0
-                };
-                process_group(s, best_cell, &stats, minimum_length);
+
+            int are_we_there_yet = 0;
+            int min_group_size = 3;
+            int first_index = 0;
+            do {
+                // Eliminate the cell that are done and compute the histogram of angles
+                int histogram[36] = {0, };
+                for (int i = first_index; i < s->nb_cells; i++) {
+                    CellMetrics *current = s->cells_metrics_sorted[i];
+                    if (current->state == CELL_STATE_DONE)
+                    {
+                        if (i == first_index)
+                            first_index++;
+                    }
+                    else
+                    {
+                        histogram[current->bucket_index]++; // ?? ++ or + length. TO VALIDATE LATER
+                    }
+                }
+
+                // Find the best range of buckets (the one that include the most vector)
+                int nb_buckets_on_each_side = 8;
+                int best_bucket_total = 0;
+                int best_angle = 0;
+                uint64_t best_bucket_bits = 0;
+
+                for (int i = 0; i < 36; i++) {
+                    int bucket_total = 0;
+                    int bucket_bits = 0;
+                    for (int di = -nb_buckets_on_each_side; di <= nb_buckets_on_each_side; di++) {
+                        int bucket_index = (i + di + 36) % 36;
+                        bucket_total += histogram[bucket_index];
+                        bucket_bits |= 1 << bucket_index;
+                    }
+                    if (bucket_total > best_bucket_total) {
+                        best_bucket_total = bucket_total;
+                        best_bucket_bits = bucket_bits;
+                        best_angle = i * 10;
+                    }
+                }
+
+                g_best_bucket_bits = best_bucket_bits;
+                qsort(&s->cells_metrics_sorted[first_index], s->nb_cells - first_index, sizeof(CellMetrics*), compare_cells);
+
+                // Limit our scan in the section that only contains the best_bucket_bits
+                int current_index = first_index;
+                int end_index = first_index;
+                while (end_index < s->nb_cells
+                    && (s->cells_metrics_sorted[end_index++]->bucket_bit & best_bucket_bits) != 0) {
+                }
+                int starting_group_index = current_group_index;
+
+                while (current_index < end_index) {
+
+                    while (current_index < end_index
+                        && (s->cells_metrics_sorted[current_index]->in_group)) {
+                        current_index++;
+                    }
+                    if (current_index >= end_index) {
+                        continue;
+                    }
+
+                    CellMetrics *current = s->cells_metrics_sorted[current_index];
+
+                    GroupStats *group = &s->groups_stats[current_group_index];
+                    s->groups_stats_sorted[current_group_index] = group;
+                    current_group_index++;
+                    group->group_id = current_group_id++;
+                    group->is_final = 0;
+                    group->initial_angle = best_angle;
+                    group->nb_cells = 0;
+                    group->total_x = 0;
+                    group->total_y = 0;
+                    group->total_motion_x = 0;
+                    group->total_motion_y = 0;
+                    group->bucket_bits = best_bucket_bits;
+                    process_group(s, current, group);
+
+                    // Calculate real angle
+                    float real_angle = atan2f(group->total_motion_y, group->total_motion_x) * 180.0f / M_PI;
+                    if(real_angle < 0) real_angle += 360.0f;
+                    group->real_angle = real_angle;
+
+                    if (group->nb_cells < min_group_size) {
+                        // throw away the group
+                        current_group_index--;
+                    }
+                }
+
+                // Sort groups by is_final & size (but is_final is 0 for all)
+                qsort(&s->groups_stats_sorted[starting_group_index], current_group_index - starting_group_index, sizeof(GroupStats *), compare_groups);
+
+                int nb_to_remove = 0;
+                for (int i = starting_group_index; i < current_group_index; i++) {
+
+                    GroupStats *group = s->groups_stats_sorted[i];
+                    float angle_diff = fabsf(group->real_angle - group->initial_angle);
+                    if (angle_diff > 180.0f)
+                        angle_diff = 360.0f - angle_diff;
+
+                    if ((starting_group_index == i) || (angle_diff <= 30)) {
+                        group->is_final = 1;
+                    }
+                    else {
+                        nb_to_remove++;
+                    }
+                }
+
+                // Cleanup cells that are part of the group that we just did
+                for (int i = first_index; i < end_index; i++) {
+                    CellMetrics *cell = s->cells_metrics_sorted[i];
+                    if (cell->in_group->is_final) {
+                        cell->state = CELL_STATE_DONE;
+                    } else {
+                        cell->state = CELL_STATE_TODO;
+                        cell->in_group = NULL;
+                    }
+                }
+
+                // Compact the groups array by sorting groups by is_final & size
+                qsort(&s->groups_stats_sorted[starting_group_index], current_group_index - starting_group_index, sizeof(GroupStats *), compare_groups);
+                current_group_index -= nb_to_remove;
+
+                if (starting_group_index == current_group_index) {
+                    are_we_there_yet = 1;
+                }
+
+            } while (are_we_there_yet == 0);
+
+            qsort(s->groups_stats_sorted, current_group_index, sizeof(GroupStats *), compare_groups);
+
+            for (int i = 0; i < current_group_index; i++) {
+                GroupStats *group = s->groups_stats_sorted[i];
+
+                // if (group->nb_cells < 200)
+                //    continue;
 
                 // Now you can draw your circle at:
-                float center_x = stats.total_x / stats.nb_cells;
-                float center_y = stats.total_y / stats.nb_cells;
-                float mean_angle = atan2f(stats.sum_sin, stats.sum_cos) * 180.0f / M_PI;
-                if (mean_angle < 0) mean_angle += 360.0f;
+                float center_x = group->total_x / group->nb_cells;
+                float center_y = group->total_y / group->nb_cells;
 
                 uint8_t color[4];
-                color[0] = (stats.group_id * 37) % 256;  // R
-                color[1] = (stats.group_id * 73) % 256;  // G
-                color[2] = (stats.group_id * 151) % 256; // B
+                color[0] = (group->group_id * 37) % 256;  // R
+                color[1] = (group->group_id * 73) % 256;  // G
+                color[2] = (group->group_id * 151) % 256; // B
                 color[3] = 255;  // Alpha
+                color[0] = 255;  // R
+                color[1] = 80;  // G
+                color[2] = 80; // B
 
-                draw_motion_group(frame, stats, s->mb_size, color);
+                draw_motion_group(frame, group, s->mb_size, color);
             }
-        }
-
-        // Write the motion vector array
-        for (int index = 0; index < s-> nb_cells; index++)
-        {
-            CellMetrics *mva = &s->cells_metrics[index];
-            avio_w8(s->io_ctx, mva->motion_x);
-            avio_w8(s->io_ctx, mva->motion_y);
         }
     }
 
@@ -553,6 +795,9 @@ static av_cold void uninit(AVFilterContext *ctx)
     // Free the motion vector array
     if (s->cells_metrics) {
         av_free(s->cells_metrics);
+    }
+    if (s->cells_metrics_sorted) {
+        av_free(s->cells_metrics_sorted);
     }
 
     if (s->format == FILE_FORMAT_MATRIX && s->frame_number > 0) {
