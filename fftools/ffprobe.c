@@ -104,6 +104,7 @@ typedef struct InputFile {
 const char program_name[] = "ffprobe";
 const int program_birth_year = 2007;
 
+static int do_analyze_frames = 0;
 static int do_bitexact = 0;
 static int do_count_frames = 0;
 static int do_count_packets = 0;
@@ -385,6 +386,8 @@ static int nb_streams;
 static uint64_t *nb_streams_packets;
 static uint64_t *nb_streams_frames;
 static int *selected_streams;
+static int *streams_with_closed_captions;
+static int *streams_with_film_grain;
 
 #if HAVE_THREADS
 pthread_mutex_t log_mutex;
@@ -2544,6 +2547,11 @@ static void print_pkt_side_data(WriterContext *w,
             const AVStereo3D *stereo = (AVStereo3D *)sd->data;
             print_str("type", av_stereo3d_type_name(stereo->type));
             print_int("inverted", !!(stereo->flags & AV_STEREO3D_FLAG_INVERT));
+            print_str("view", av_stereo3d_view_name(stereo->view));
+            print_str("primary_eye", av_stereo3d_primary_eye_name(stereo->primary_eye));
+            print_int("baseline", stereo->baseline);
+            print_q("horizontal_disparity_adjustment", stereo->horizontal_disparity_adjustment, '/');
+            print_q("horizontal_field_of_view", stereo->horizontal_field_of_view, '/');
         } else if (sd->type == AV_PKT_DATA_SPHERICAL) {
             const AVSphericalMapping *spherical = (AVSphericalMapping *)sd->data;
             print_str("projection", av_spherical_projection_name(spherical->projection));
@@ -2598,6 +2606,7 @@ static void print_pkt_side_data(WriterContext *w,
             print_dynamic_hdr10_plus(w, metadata);
         } else if (sd->type == AV_PKT_DATA_DOVI_CONF) {
             AVDOVIDecoderConfigurationRecord *dovi = (AVDOVIDecoderConfigurationRecord *)sd->data;
+            const char *comp = "unknown";
             print_int("dv_version_major", dovi->dv_version_major);
             print_int("dv_version_minor", dovi->dv_version_minor);
             print_int("dv_profile", dovi->dv_profile);
@@ -2606,6 +2615,14 @@ static void print_pkt_side_data(WriterContext *w,
             print_int("el_present_flag", dovi->el_present_flag);
             print_int("bl_present_flag", dovi->bl_present_flag);
             print_int("dv_bl_signal_compatibility_id", dovi->dv_bl_signal_compatibility_id);
+            switch (dovi->dv_md_compression)
+            {
+                case AV_DOVI_COMPRESSION_NONE:     comp = "none";     break;
+                case AV_DOVI_COMPRESSION_LIMITED:  comp = "limited";  break;
+                case AV_DOVI_COMPRESSION_RESERVED: comp = "reserved"; break;
+                case AV_DOVI_COMPRESSION_EXTENDED: comp = "extended"; break;
+            }
+            print_str("dv_md_compression", comp);
         } else if (sd->type == AV_PKT_DATA_AUDIO_SERVICE_TYPE) {
             enum AVAudioServiceType *t = (enum AVAudioServiceType *)sd->data;
             print_int("service_type", *t);
@@ -2623,6 +2640,11 @@ static void print_pkt_side_data(WriterContext *w,
             if (do_show_data)
                 writer_print_data(w, "data", sd->data, sd->size);
             writer_print_data_hash(w, "data_hash", sd->data, sd->size);
+        } else if (sd->type == AV_PKT_DATA_FRAME_CROPPING && sd->size >= sizeof(uint32_t) * 4) {
+            print_int("crop_top",    AV_RL32(sd->data));
+            print_int("crop_bottom", AV_RL32(sd->data + 4));
+            print_int("crop_left",   AV_RL32(sd->data + 8));
+            print_int("crop_right",  AV_RL32(sd->data + 12));
         } else if (sd->type == AV_PKT_DATA_AFD && sd->size > 0) {
             print_int("active_format", *sd->data);
         }
@@ -2901,6 +2923,8 @@ static void print_frame_side_data(WriterContext *w,
         } else if (sd->type == AV_FRAME_DATA_FILM_GRAIN_PARAMS) {
             AVFilmGrainParams *fgp = (AVFilmGrainParams *)sd->data;
             print_film_grain_params(w, fgp);
+        } else if (sd->type == AV_FRAME_DATA_VIEW_ID) {
+            print_int("view_id", *(int*)sd->data);
         }
         writer_print_section_footer(w);
     }
@@ -3051,6 +3075,16 @@ static av_always_inline int process_frame(WriterContext *w,
                 show_subtitle(w, &sub, ifile->streams[pkt->stream_index].st, fmt_ctx);
             else
                 show_frame(w, frame, ifile->streams[pkt->stream_index].st, fmt_ctx);
+
+        if (!is_sub && do_analyze_frames) {
+            for (int i = 0; i < frame->nb_side_data; i++) {
+                if (frame->side_data[i]->type == AV_FRAME_DATA_A53_CC)
+                    streams_with_closed_captions[pkt->stream_index] = 1;
+                else if (frame->side_data[i]->type == AV_FRAME_DATA_FILM_GRAIN_PARAMS)
+                    streams_with_film_grain[pkt->stream_index] = 1;
+            }
+        }
+
         if (is_sub)
             avsubtitle_free(&sub);
     }
@@ -3133,6 +3167,8 @@ static int read_interval_packets(WriterContext *w, InputFile *ifile,
             REALLOCZ_ARRAY_STREAM(nb_streams_frames,  nb_streams, fmt_ctx->nb_streams);
             REALLOCZ_ARRAY_STREAM(nb_streams_packets, nb_streams, fmt_ctx->nb_streams);
             REALLOCZ_ARRAY_STREAM(selected_streams,   nb_streams, fmt_ctx->nb_streams);
+            REALLOCZ_ARRAY_STREAM(streams_with_closed_captions,   nb_streams, fmt_ctx->nb_streams);
+            REALLOCZ_ARRAY_STREAM(streams_with_film_grain,        nb_streams, fmt_ctx->nb_streams);
             nb_streams = fmt_ctx->nb_streams;
         }
         if (selected_streams[pkt->stream_index]) {
@@ -3316,16 +3352,19 @@ static int show_stream(WriterContext *w, AVFormatContext *fmt_ctx, int stream_id
         if (dec_ctx) {
             print_int("coded_width",  dec_ctx->coded_width);
             print_int("coded_height", dec_ctx->coded_height);
-            print_int("closed_captions", !!(dec_ctx->properties & FF_CODEC_PROPERTY_CLOSED_CAPTIONS));
-            print_int("film_grain", !!(dec_ctx->properties & FF_CODEC_PROPERTY_FILM_GRAIN));
+
+            if (do_analyze_frames) {
+                print_int("closed_captions", streams_with_closed_captions[stream->index]);
+                print_int("film_grain",      streams_with_film_grain[stream->index]);
+            }
         }
         print_int("has_b_frames", par->video_delay);
         sar = av_guess_sample_aspect_ratio(fmt_ctx, stream, NULL);
         if (sar.num) {
             print_q("sample_aspect_ratio", sar, ':');
             av_reduce(&dar.num, &dar.den,
-                      par->width  * sar.num,
-                      par->height * sar.den,
+                      (int64_t) par->width  * sar.num,
+                      (int64_t) par->height * sar.den,
                       1024*1024);
             print_q("display_aspect_ratio", dar, ':');
         } else {
@@ -3922,7 +3961,7 @@ static int open_input_file(InputFile *ifile, const char *filename,
             AVDictionary *opts;
 
             err = filter_codec_opts(codec_opts, stream->codecpar->codec_id,
-                                    fmt_ctx, stream, codec, &opts);
+                                    fmt_ctx, stream, codec, &opts, NULL);
             if (err < 0)
                 exit(1);
 
@@ -3951,7 +3990,7 @@ static int open_input_file(InputFile *ifile, const char *filename,
                 exit(1);
             }
 
-            if ((t = av_dict_get(opts, "", NULL, AV_DICT_IGNORE_SUFFIX))) {
+            if ((t = av_dict_iterate(opts, NULL))) {
                 av_log(NULL, AV_LOG_ERROR, "Option %s for input stream %d not found\n",
                        t->key, stream->index);
                 return AVERROR_OPTION_NOT_FOUND;
@@ -3984,7 +4023,8 @@ static int probe_file(WriterContext *wctx, const char *filename,
     int ret, i;
     int section_id;
 
-    do_read_frames = do_show_frames || do_count_frames;
+    do_analyze_frames = do_analyze_frames && do_show_streams;
+    do_read_frames = do_show_frames || do_count_frames || do_analyze_frames;
     do_read_packets = do_show_packets || do_count_packets;
 
     ret = open_input_file(&ifile, filename, print_filename);
@@ -3997,6 +4037,8 @@ static int probe_file(WriterContext *wctx, const char *filename,
     REALLOCZ_ARRAY_STREAM(nb_streams_frames,0,ifile.fmt_ctx->nb_streams);
     REALLOCZ_ARRAY_STREAM(nb_streams_packets,0,ifile.fmt_ctx->nb_streams);
     REALLOCZ_ARRAY_STREAM(selected_streams,0,ifile.fmt_ctx->nb_streams);
+    REALLOCZ_ARRAY_STREAM(streams_with_closed_captions,0,ifile.fmt_ctx->nb_streams);
+    REALLOCZ_ARRAY_STREAM(streams_with_film_grain,0,ifile.fmt_ctx->nb_streams);
 
     for (i = 0; i < ifile.fmt_ctx->nb_streams; i++) {
         if (stream_specifier) {
@@ -4059,6 +4101,8 @@ end:
     av_freep(&nb_streams_frames);
     av_freep(&nb_streams_packets);
     av_freep(&selected_streams);
+    av_freep(&streams_with_closed_captions);
+    av_freep(&streams_with_film_grain);
 
     return ret;
 }
@@ -4581,6 +4625,7 @@ static const OptionDef real_options[] = {
     { "show_optional_fields",  OPT_TYPE_FUNC, OPT_FUNC_ARG, { .func_arg = &opt_show_optional_fields }, "show optional fields" },
     { "show_private_data",     OPT_TYPE_BOOL,        0, { &show_private_data }, "show private data" },
     { "private",               OPT_TYPE_BOOL,        0, { &show_private_data }, "same as show_private_data" },
+    { "analyze_frames",        OPT_TYPE_BOOL,        0, { &do_analyze_frames }, "analyze frames to provide additional stream-level information" },
     { "bitexact",              OPT_TYPE_BOOL,        0, {&do_bitexact}, "force bitexact output" },
     { "read_intervals",        OPT_TYPE_FUNC, OPT_FUNC_ARG, {.func_arg = opt_read_intervals}, "set read intervals", "read_intervals" },
     { "i",                     OPT_TYPE_FUNC, OPT_FUNC_ARG, {.func_arg = opt_input_file_i}, "read specified file", "input_file"},

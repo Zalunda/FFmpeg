@@ -40,8 +40,8 @@
 #include "libavutil/pixdesc.h"
 #include "libavutil/opt.h"
 #include "avfilter.h"
+#include "filters.h"
 #include "formats.h"
-#include "internal.h"
 #include "video.h"
 #include "v360.h"
 
@@ -172,9 +172,11 @@ static const AVOption v360_options[] = {
 
 AVFILTER_DEFINE_CLASS(v360);
 
-static int query_formats(AVFilterContext *ctx)
+static int query_formats(const AVFilterContext *ctx,
+                         AVFilterFormatsConfig **cfg_in,
+                         AVFilterFormatsConfig **cfg_out)
 {
-    V360Context *s = ctx->priv;
+    const V360Context *s = ctx->priv;
     static const enum AVPixelFormat pix_fmts[] = {
         // YUVA444
         AV_PIX_FMT_YUVA444P,   AV_PIX_FMT_YUVA444P9,
@@ -250,7 +252,8 @@ static int query_formats(AVFilterContext *ctx)
         AV_PIX_FMT_NONE
     };
 
-    return ff_set_common_formats_from_list(ctx, s->alpha ? alpha_pix_fmts : pix_fmts);
+    return ff_set_common_formats_from_list2(ctx, cfg_in, cfg_out,
+                                            s->alpha ? alpha_pix_fmts : pix_fmts);
 }
 
 #define DEFINE_REMAP1_LINE(bits, div)                                                    \
@@ -285,6 +288,8 @@ static int remap##ws##_##bits##bit_slice(AVFilterContext *ctx, void *arg, int jo
     const SliceXYRemap *r = &s->slice_remap[jobnr];                                                        \
     const AVFrame *in = td->in;                                                                            \
     AVFrame *out = td->out;                                                                                \
+                                                                                                           \
+    av_assert1(s->nb_planes <= AV_VIDEO_MAX_PLANES);                                                       \
                                                                                                            \
     for (int stereo = 0; stereo < 1 + s->out_stereo > STEREO_2D; stereo++) {                               \
         for (int plane = 0; plane < s->nb_planes; plane++) {                                               \
@@ -3787,6 +3792,8 @@ static int barrelsplit_to_xyz(const V360Context *s,
         case 3: // back bottom
             vf = (y * 2.f - 1.5f) / scaleh + 3.f - facef;
             break;
+        default:
+            av_assert0(0);
         }
         l_x = (0.5f - uf) / scalew;
         l_y =  0.5f * dir_vert;
@@ -4996,7 +5003,7 @@ const AVFilter ff_vf_v360 = {
     .uninit        = uninit,
     FILTER_INPUTS(inputs),
     FILTER_OUTPUTS(outputs),
-    FILTER_QUERY_FUNC(query_formats),
+    FILTER_QUERY_FUNC2(query_formats),
     .priv_class    = &v360_class,
     .flags         = AVFILTER_FLAG_SLICE_THREADS,
     .process_command = process_command,

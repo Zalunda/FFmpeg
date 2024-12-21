@@ -93,6 +93,14 @@
 
 #define IS_REF0(a)         ((a) & MB_TYPE_REF0)
 #define IS_8x8DCT(a)       ((a) & MB_TYPE_8x8DCT)
+#define IS_SUB_8X8(a)      ((a) & MB_TYPE_16x16) // note reused
+#define IS_SUB_8X4(a)      ((a) & MB_TYPE_16x8)  // note reused
+#define IS_SUB_4X8(a)      ((a) & MB_TYPE_8x16)  // note reused
+#define IS_SUB_4X4(a)      ((a) & MB_TYPE_8x8)   // note reused
+#define IS_DIR(a, part, list) ((a) & (MB_TYPE_P0L0 << ((part) + 2 * (list))))
+
+// does this mb use listX, note does not work if subMBs
+#define USES_LIST(a, list) ((a) & ((MB_TYPE_P0L0 | MB_TYPE_P1L0) << (2 * (list))))
 
 /**
  * Memory management control operation.
@@ -562,11 +570,11 @@ typedef struct H264Context {
 
     H264SEIContext sei;
 
-    struct FFRefStructPool *qscale_table_pool;
-    struct FFRefStructPool *mb_type_pool;
-    struct FFRefStructPool *motion_val_pool;
-    struct FFRefStructPool *ref_index_pool;
-    struct FFRefStructPool *decode_error_flags_pool;
+    struct AVRefStructPool *qscale_table_pool;
+    struct AVRefStructPool *mb_type_pool;
+    struct AVRefStructPool *motion_val_pool;
+    struct AVRefStructPool *ref_index_pool;
+    struct AVRefStructPool *decode_error_flags_pool;
     int ref2frm[MAX_SLICES][2][64];     ///< reference to frame number lists, used in the loop filter, the first 2 are for -2,-1
 
     int non_gray;                       ///< Did we encounter a intra frame after a gray gap frame

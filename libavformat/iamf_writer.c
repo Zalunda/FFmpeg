@@ -39,11 +39,15 @@ static int update_extradata(IAMFCodecConfig *codec_config)
 
     switch(codec_config->codec_id) {
     case AV_CODEC_ID_OPUS:
-        if (codec_config->extradata_size < 19)
+        if (codec_config->extradata_size != 19)
             return AVERROR_INVALIDDATA;
         codec_config->extradata_size -= 8;
-        memmove(codec_config->extradata, codec_config->extradata + 8, codec_config->extradata_size);
-        AV_WB8(codec_config->extradata + 1, 2); // set channels to stereo
+        AV_WB8(codec_config->extradata   + 0,  AV_RL8(codec_config->extradata + 8)); // version
+        AV_WB8(codec_config->extradata   + 1,  2); // set channels to stereo
+        AV_WB16A(codec_config->extradata + 2,  AV_RL16A(codec_config->extradata + 10)); // Byte swap pre-skip
+        AV_WB32A(codec_config->extradata + 4,  AV_RL32A(codec_config->extradata + 12)); // Byte swap sample rate
+        AV_WB16A(codec_config->extradata + 8,  0); // set Output Gain to 0
+        AV_WB8(codec_config->extradata   + 10, AV_RL8(codec_config->extradata + 18)); // Mapping family
         break;
     case AV_CODEC_ID_FLAC: {
         uint8_t buf[13];
@@ -72,6 +76,34 @@ static int update_extradata(IAMFCodecConfig *codec_config)
     return 0;
 }
 
+static int populate_audio_roll_distance(IAMFCodecConfig *codec_config)
+{
+    switch (codec_config->codec_id) {
+    case AV_CODEC_ID_OPUS:
+        if (!codec_config->nb_samples)
+            return AVERROR(EINVAL);
+        // ceil(3840 / nb_samples)
+        codec_config->audio_roll_distance = -(1 + ((3840 - 1) / codec_config->nb_samples));
+        break;
+    case AV_CODEC_ID_AAC:
+        codec_config->audio_roll_distance = -1;
+        break;
+    case AV_CODEC_ID_FLAC:
+    case AV_CODEC_ID_PCM_S16BE:
+    case AV_CODEC_ID_PCM_S24BE:
+    case AV_CODEC_ID_PCM_S32BE:
+    case AV_CODEC_ID_PCM_S16LE:
+    case AV_CODEC_ID_PCM_S24LE:
+    case AV_CODEC_ID_PCM_S32LE:
+        codec_config->audio_roll_distance = 0;
+        break;
+    default:
+        return AVERROR(EINVAL);
+    }
+
+    return 0;
+}
+
 static int fill_codec_config(IAMFContext *iamf, const AVStreamGroup *stg,
                              IAMFCodecConfig *codec_config)
 {
@@ -80,10 +112,18 @@ static int fill_codec_config(IAMFContext *iamf, const AVStreamGroup *stg,
     int j, ret = 0;
 
     codec_config->codec_id = st->codecpar->codec_id;
-    codec_config->sample_rate = st->codecpar->sample_rate;
     codec_config->codec_tag = st->codecpar->codec_tag;
-    codec_config->nb_samples = st->codecpar->frame_size;
-    codec_config->seek_preroll = st->codecpar->seek_preroll;
+    switch (codec_config->codec_id) {
+    case AV_CODEC_ID_OPUS:
+        codec_config->sample_rate = 48000;
+        codec_config->nb_samples = av_rescale(st->codecpar->frame_size, 48000, st->codecpar->sample_rate);
+        break;
+    default:
+        codec_config->sample_rate = st->codecpar->sample_rate;
+        codec_config->nb_samples = st->codecpar->frame_size;
+        break;
+    }
+    populate_audio_roll_distance(codec_config);
     if (st->codecpar->extradata_size) {
         codec_config->extradata = av_memdup(st->codecpar->extradata, st->codecpar->extradata_size);
         if (!codec_config->extradata)
@@ -151,9 +191,9 @@ static int add_param_definition(IAMFContext *iamf, AVIAMFParamDefinition *param,
     }
     if (codec_config) {
         if (!param->duration)
-            param->duration = codec_config->nb_samples;
+            param->duration = av_rescale(codec_config->nb_samples, param->parameter_rate, codec_config->sample_rate);
         if (!param->constant_subblock_duration)
-            param->constant_subblock_duration = codec_config->nb_samples;
+            param->constant_subblock_duration = av_rescale(codec_config->nb_samples, param->parameter_rate, codec_config->sample_rate);
     }
 
     param_definition = av_mallocz(sizeof(*param_definition));
@@ -208,8 +248,13 @@ int ff_iamf_add_audio_element(IAMFContext *iamf, const AVStreamGroup *stg, void 
                     break;
 
             if (j >= FF_ARRAY_ELEMS(ff_iamf_scalable_ch_layouts)) {
-                av_log(log_ctx, AV_LOG_ERROR, "Unsupported channel layout in stream group #%d\n", i);
-                return AVERROR(EINVAL);
+                for (j = 0; j < FF_ARRAY_ELEMS(ff_iamf_expanded_scalable_ch_layouts); j++)
+                    if (!av_channel_layout_compare(&layer->ch_layout, &ff_iamf_expanded_scalable_ch_layouts[j]))
+                        break;
+                if (j >= FF_ARRAY_ELEMS(ff_iamf_expanded_scalable_ch_layouts)) {
+                    av_log(log_ctx, AV_LOG_ERROR, "Unsupported channel layout in stream group #%d\n", i);
+                    return AVERROR(EINVAL);
+                }
             }
         }
 
@@ -427,7 +472,7 @@ static int iamf_write_codec_config(const IAMFContext *iamf,
     avio_wl32(dyn_bc, codec_config->codec_tag);
 
     ffio_write_leb(dyn_bc, codec_config->nb_samples);
-    avio_wb16(dyn_bc, codec_config->seek_preroll);
+    avio_wb16(dyn_bc, codec_config->audio_roll_distance);
 
     switch(codec_config->codec_id) {
     case AV_CODEC_ID_OPUS:
@@ -441,32 +486,32 @@ static int iamf_write_codec_config(const IAMFContext *iamf,
         avio_write(dyn_bc, codec_config->extradata, codec_config->extradata_size);
         break;
     case AV_CODEC_ID_PCM_S16LE:
-        avio_w8(dyn_bc, 0);
+        avio_w8(dyn_bc, 1);
         avio_w8(dyn_bc, 16);
         avio_wb32(dyn_bc, codec_config->sample_rate);
         break;
     case AV_CODEC_ID_PCM_S24LE:
-        avio_w8(dyn_bc, 0);
+        avio_w8(dyn_bc, 1);
         avio_w8(dyn_bc, 24);
         avio_wb32(dyn_bc, codec_config->sample_rate);
         break;
     case AV_CODEC_ID_PCM_S32LE:
-        avio_w8(dyn_bc, 0);
+        avio_w8(dyn_bc, 1);
         avio_w8(dyn_bc, 32);
         avio_wb32(dyn_bc, codec_config->sample_rate);
         break;
     case AV_CODEC_ID_PCM_S16BE:
-        avio_w8(dyn_bc, 1);
+        avio_w8(dyn_bc, 0);
         avio_w8(dyn_bc, 16);
         avio_wb32(dyn_bc, codec_config->sample_rate);
         break;
     case AV_CODEC_ID_PCM_S24BE:
-        avio_w8(dyn_bc, 1);
+        avio_w8(dyn_bc, 0);
         avio_w8(dyn_bc, 24);
         avio_wb32(dyn_bc, codec_config->sample_rate);
         break;
     case AV_CODEC_ID_PCM_S32BE:
-        avio_w8(dyn_bc, 1);
+        avio_w8(dyn_bc, 0);
         avio_w8(dyn_bc, 32);
         avio_wb32(dyn_bc, codec_config->sample_rate);
         break;
@@ -507,13 +552,19 @@ static int scalable_channel_layout_config(const IAMFAudioElement *audio_element,
     avio_write(dyn_bc, header, put_bytes_count(&pb, 1));
     for (int i = 0; i < element->nb_layers; i++) {
         const AVIAMFLayer *layer = element->layers[i];
-        int layout;
+        int layout, expanded_layout = -1;
         for (layout = 0; layout < FF_ARRAY_ELEMS(ff_iamf_scalable_ch_layouts); layout++) {
             if (!av_channel_layout_compare(&layer->ch_layout, &ff_iamf_scalable_ch_layouts[layout]))
                 break;
         }
+        if (layout >= FF_ARRAY_ELEMS(ff_iamf_scalable_ch_layouts))
+            for (expanded_layout = 0; expanded_layout < FF_ARRAY_ELEMS(ff_iamf_scalable_ch_layouts); expanded_layout++) {
+                if (!av_channel_layout_compare(&layer->ch_layout, &ff_iamf_expanded_scalable_ch_layouts[expanded_layout]))
+                    break;
+            }
+        av_assert0(expanded_layout > 0 || layout < FF_ARRAY_ELEMS(ff_iamf_scalable_ch_layouts));
         init_put_bits(&pb, header, sizeof(header));
-        put_bits(&pb, 4, layout);
+        put_bits(&pb, 4, expanded_layout >= 0 ? 15 : layout);
         put_bits(&pb, 1, !!layer->output_gain_flags);
         put_bits(&pb, 1, !!(layer->flags & AV_IAMF_LAYER_FLAG_RECON_GAIN));
         put_bits(&pb, 2, 0); // reserved
@@ -524,6 +575,8 @@ static int scalable_channel_layout_config(const IAMFAudioElement *audio_element,
             put_bits(&pb, 2, 0);
             put_bits(&pb, 16, rescale_rational(layer->output_gain, 1 << 8));
         }
+        if (expanded_layout >= 0)
+            put_bits(&pb, 8, expanded_layout);
         flush_put_bits(&pb);
         avio_write(dyn_bc, header, put_bytes_count(&pb, 1));
     }
@@ -785,6 +838,9 @@ static int iamf_write_mixing_presentation(const IAMFContext *iamf,
                     av_log(log_ctx, AV_LOG_ERROR, "Invalid Sound System value in a submix\n");
                     return AVERROR(EINVAL);
                 }
+            } else if (submix_layout->layout_type != AV_IAMF_SUBMIX_LAYOUT_TYPE_BINAURAL) {
+                av_log(log_ctx, AV_LOG_ERROR, "Unsupported Layout Type value in a submix\n");
+                return AVERROR(EINVAL);
             }
             init_put_bits(&pbc, header, sizeof(header));
             put_bits(&pbc, 2, submix_layout->layout_type); // layout_type

@@ -36,7 +36,7 @@
 #include "hwconfig.h"
 #include "mathops.h"
 #include "progressframe.h"
-#include "refstruct.h"
+#include "libavutil/refstruct.h"
 #include "thread.h"
 #include "vp8.h"
 #include "vp89_rac.h"
@@ -107,7 +107,7 @@ static int vp8_alloc_frame(VP8Context *s, VP8Frame *f, int ref)
                                            ref ? AV_GET_BUFFER_FLAG_REF : 0);
     if (ret < 0)
         return ret;
-    f->seg_map = ff_refstruct_allocz(s->mb_width * s->mb_height);
+    f->seg_map = av_refstruct_allocz(s->mb_width * s->mb_height);
     if (!f->seg_map) {
         ret = AVERROR(ENOMEM);
         goto fail;
@@ -119,15 +119,15 @@ static int vp8_alloc_frame(VP8Context *s, VP8Frame *f, int ref)
     return 0;
 
 fail:
-    ff_refstruct_unref(&f->seg_map);
+    av_refstruct_unref(&f->seg_map);
     ff_progress_frame_unref(&f->tf);
     return ret;
 }
 
 static void vp8_release_frame(VP8Frame *f)
 {
-    ff_refstruct_unref(&f->seg_map);
-    ff_refstruct_unref(&f->hwaccel_picture_private);
+    av_refstruct_unref(&f->seg_map);
+    av_refstruct_unref(&f->hwaccel_picture_private);
     ff_progress_frame_unref(&f->tf);
 }
 
@@ -247,8 +247,16 @@ int update_dimensions(VP8Context *s, int width, int height, int is_vp7)
             return AVERROR(ENOMEM);
         }
 #if HAVE_THREADS
-        pthread_mutex_init(&s->thread_data[i].lock, NULL);
-        pthread_cond_init(&s->thread_data[i].cond, NULL);
+        ret = pthread_mutex_init(&s->thread_data[i].lock, NULL);
+        if (ret) {
+            free_buffers(s);
+            return AVERROR(ret);
+        }
+        ret = pthread_cond_init(&s->thread_data[i].cond, NULL);
+        if (ret) {
+            free_buffers(s);
+            return AVERROR(ret);
+        }
 #endif
     }
 
@@ -341,9 +349,8 @@ static int setup_partitions(VP8Context *s, const uint8_t *buf, int buf_size)
     }
 
     s->coeff_partition_size[i] = buf_size;
-    ff_vpx_init_range_decoder(&s->coeff_partition[i], buf, buf_size);
 
-    return 0;
+    return ff_vpx_init_range_decoder(&s->coeff_partition[i], buf, buf_size);
 }
 
 static void vp7_get_quants(VP8Context *s)
@@ -2898,8 +2905,8 @@ av_cold int ff_vp8_decode_init(AVCodecContext *avctx)
 static void vp8_replace_frame(VP8Frame *dst, const VP8Frame *src)
 {
     ff_progress_frame_replace(&dst->tf, &src->tf);
-    ff_refstruct_replace(&dst->seg_map, src->seg_map);
-    ff_refstruct_replace(&dst->hwaccel_picture_private,
+    av_refstruct_replace(&dst->seg_map, src->seg_map);
+    av_refstruct_replace(&dst->hwaccel_picture_private,
                           src->hwaccel_picture_private);
 }
 

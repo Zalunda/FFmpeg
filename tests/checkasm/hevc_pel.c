@@ -21,7 +21,7 @@
 
 #include <string.h>
 #include "checkasm.h"
-#include "libavcodec/hevcdsp.h"
+#include "libavcodec/hevc/dsp.h"
 #include "libavutil/common.h"
 #include "libavutil/internal.h"
 #include "libavutil/intreadwrite.h"
@@ -35,15 +35,6 @@ static const int offsets[] = {0, 255, -1 };
 
 #define SIZEOF_PIXEL ((bit_depth + 7) / 8)
 #define BUF_SIZE (2 * MAX_PB_SIZE * (2 * 4 + MAX_PB_SIZE))
-
-#define checkasm_check_pixel(buf1, stride1, buf2, stride2, ...) \
-    ((bit_depth > 8) ?                                          \
-     checkasm_check(uint16_t, (const uint16_t*)buf1, stride1,   \
-                              (const uint16_t*)buf2, stride2,   \
-                              __VA_ARGS__) :                    \
-     checkasm_check(uint8_t,  (const uint8_t*) buf1, stride1,   \
-                              (const uint8_t*) buf2, stride2,   \
-                              __VA_ARGS__))
 
 #define randomize_buffers()                          \
     do {                                             \
@@ -88,7 +79,7 @@ static void checkasm_check_hevc_qpel(void)
 
     HEVCDSPContext h;
     int size, bit_depth, i, j;
-    declare_func(void, int16_t *dst, uint8_t *src, ptrdiff_t srcstride,
+    declare_func(void, int16_t *dst, const uint8_t *src, ptrdiff_t srcstride,
                  int height, intptr_t mx, intptr_t my, int width);
 
     for (bit_depth = 8; bit_depth <= 12; bit_depth++) {
@@ -132,7 +123,7 @@ static void checkasm_check_hevc_qpel_uni(void)
 
     HEVCDSPContext h;
     int size, bit_depth, i, j;
-    declare_func(void, uint8_t *dst, ptrdiff_t dststride, uint8_t *src, ptrdiff_t srcstride,
+    declare_func(void, uint8_t *dst, ptrdiff_t dststride, const uint8_t *src, ptrdiff_t srcstride,
                  int height, intptr_t mx, intptr_t my, int width);
 
     for (bit_depth = 8; bit_depth <= 12; bit_depth++) {
@@ -182,7 +173,7 @@ static void checkasm_check_hevc_qpel_uni_w(void)
     HEVCDSPContext h;
     int size, bit_depth, i, j;
     const int *denom, *wx, *ox;
-    declare_func(void, uint8_t *dst, ptrdiff_t dststride, uint8_t *src, ptrdiff_t srcstride,
+    declare_func(void, uint8_t *dst, ptrdiff_t dststride, const uint8_t *src, ptrdiff_t srcstride,
                  int height, int denom, int wx, int ox, intptr_t mx, intptr_t my, int width);
 
     for (bit_depth = 8; bit_depth <= 12; bit_depth++) {
@@ -239,8 +230,8 @@ static void checkasm_check_hevc_qpel_bi(void)
 
     HEVCDSPContext h;
     int size, bit_depth, i, j;
-    declare_func(void, uint8_t *dst, ptrdiff_t dststride, uint8_t *src, ptrdiff_t srcstride,
-                 int16_t *src2,
+    declare_func(void, uint8_t *dst, ptrdiff_t dststride, const uint8_t *src, ptrdiff_t srcstride,
+                 const int16_t *src2,
                  int height, intptr_t mx, intptr_t my, int width);
 
     for (bit_depth = 8; bit_depth <= 12; bit_depth++) {
@@ -292,8 +283,8 @@ static void checkasm_check_hevc_qpel_bi_w(void)
     HEVCDSPContext h;
     int size, bit_depth, i, j;
     const int *denom, *wx, *ox;
-    declare_func(void, uint8_t *dst, ptrdiff_t dststride, uint8_t *src, ptrdiff_t srcstride,
-                 int16_t *src2,
+    declare_func(void, uint8_t *dst, ptrdiff_t dststride, const uint8_t *src, ptrdiff_t srcstride,
+                 const int16_t *src2,
                  int height, int denom, int wx0, int wx1,
                  int ox0, int ox1, intptr_t mx, intptr_t my, int width);
 
@@ -352,7 +343,7 @@ static void checkasm_check_hevc_epel(void)
 
     HEVCDSPContext h;
     int size, bit_depth, i, j;
-    declare_func(void, int16_t *dst, uint8_t *src, ptrdiff_t srcstride,
+    declare_func(void, int16_t *dst, const uint8_t *src, ptrdiff_t srcstride,
                  int height, intptr_t mx, intptr_t my, int width);
 
     for (bit_depth = 8; bit_depth <= 12; bit_depth++) {
@@ -396,7 +387,7 @@ static void checkasm_check_hevc_epel_uni(void)
 
     HEVCDSPContext h;
     int size, bit_depth, i, j;
-    declare_func(void, uint8_t *dst, ptrdiff_t dststride, uint8_t *src, ptrdiff_t srcstride,
+    declare_func(void, uint8_t *dst, ptrdiff_t dststride, const uint8_t *src, ptrdiff_t srcstride,
                  int height, intptr_t mx, intptr_t my, int width);
 
     for (bit_depth = 8; bit_depth <= 12; bit_depth++) {
@@ -446,7 +437,7 @@ static void checkasm_check_hevc_epel_uni_w(void)
     HEVCDSPContext h;
     int size, bit_depth, i, j;
     const int *denom, *wx, *ox;
-    declare_func(void, uint8_t *dst, ptrdiff_t dststride, uint8_t *src, ptrdiff_t srcstride,
+    declare_func(void, uint8_t *dst, ptrdiff_t dststride, const uint8_t *src, ptrdiff_t srcstride,
                  int height, int denom, int wx, int ox, intptr_t mx, intptr_t my, int width);
 
     for (bit_depth = 8; bit_depth <= 12; bit_depth++) {
@@ -503,8 +494,8 @@ static void checkasm_check_hevc_epel_bi(void)
 
     HEVCDSPContext h;
     int size, bit_depth, i, j;
-    declare_func(void, uint8_t *dst, ptrdiff_t dststride, uint8_t *src, ptrdiff_t srcstride,
-                 int16_t *src2,
+    declare_func(void, uint8_t *dst, ptrdiff_t dststride, const uint8_t *src, ptrdiff_t srcstride,
+                 const int16_t *src2,
                  int height, intptr_t mx, intptr_t my, int width);
 
     for (bit_depth = 8; bit_depth <= 12; bit_depth++) {
@@ -556,8 +547,8 @@ static void checkasm_check_hevc_epel_bi_w(void)
     HEVCDSPContext h;
     int size, bit_depth, i, j;
     const int *denom, *wx, *ox;
-    declare_func(void, uint8_t *dst, ptrdiff_t dststride, uint8_t *src, ptrdiff_t srcstride,
-                 int16_t *src2,
+    declare_func(void, uint8_t *dst, ptrdiff_t dststride, const uint8_t *src, ptrdiff_t srcstride,
+                 const int16_t *src2,
                  int height, int denom, int wx0, int wx1,
                  int ox0, int ox1, intptr_t mx, intptr_t my, int width);
 
