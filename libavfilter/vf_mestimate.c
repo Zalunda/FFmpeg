@@ -43,6 +43,8 @@ typedef struct MEContext {
     int current_dir;
 
     int (*mv_table[3])[2][2];           ///< motion vectors of current & prev 2 frames
+
+    int vr;                             // New flag for VR mode
 } MEContext;
 
 typedef struct ThreadData {
@@ -68,6 +70,7 @@ static const AVOption mestimate_options[] = {
     { "mb_size", "macroblock size", OFFSET(mb_size), AV_OPT_TYPE_INT, {.i64 = 16}, 8, INT_MAX, FLAGS },
     { "search_param", "search parameter", OFFSET(search_param), AV_OPT_TYPE_INT, {.i64 = 7}, 4, INT_MAX, FLAGS },
     { "onlyprev", "use only previous frame for motion estimation", OFFSET(onlyprev), AV_OPT_TYPE_BOOL, {.i64 = 0}, 0, 1, FLAGS },
+    { "vr", "enable VR left-right eye comparison", OFFSET(vr), AV_OPT_TYPE_BOOL, {.i64=0}, 0, 1, FLAGS },
     { NULL }
 };
 
@@ -300,12 +303,31 @@ static int filter_slice(AVFilterContext *ctx, void *arg, int jobnr, int nb_jobs)
     return 0;
 }
 
+static void prepare_reference_frame(AVFrame *prev_frame, AVFrame *cur_frame)
+{
+    if (!prev_frame || !cur_frame)
+        return;
+
+    const int width = cur_frame->width;
+    const int height = cur_frame->height;
+    const int half_width = width / 2;
+
+    // Process line by line
+    for (int y = 0; y < height; y++) {
+        // Left side stays as previous frame (unchanged)
+        // Right side: copy from current frame's left side
+        memcpy(prev_frame->data[0] + y * prev_frame->linesize[0] + half_width,
+               cur_frame->data[0] + y * cur_frame->linesize[0],
+               half_width);
+    }
+}
+
 static int filter_frame(AVFilterLink *inlink, AVFrame *frame)
 {
     AVFilterContext *ctx = inlink->dst;
     MEContext *s = ctx->priv;
     AVMotionEstContext *me_ctx = &s->me_ctx;
-    AVFrameSideData *sd;    
+    AVFrameSideData *sd;
     AVFrame *out;
     int ret;
 
@@ -321,6 +343,10 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *frame)
 
     s->mv_table[2] = memcpy(s->mv_table[2], s->mv_table[1], sizeof(*s->mv_table[1]) * s->b_count);
     s->mv_table[1] = memcpy(s->mv_table[1], s->mv_table[0], sizeof(*s->mv_table[0]) * s->b_count);
+
+    if (s->vr) {
+        prepare_reference_frame(s->prev, s->cur);
+    }
 
     if (!s->cur) {
         s->cur = av_frame_clone(frame);
