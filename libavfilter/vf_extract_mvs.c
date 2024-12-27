@@ -3,7 +3,6 @@
 #include <libavutil/mem.h>
 #include <libavformat/avio.h>
 #include "avfilter.h"
-#include "internal.h"
 #include "video.h"
 
 typedef enum {

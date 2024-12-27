@@ -25,7 +25,6 @@
 #include "libavutil/opt.h"
 #include "libavutil/motion_vector.h"
 #include "avfilter.h"
-#include "internal.h"
 #include "video.h"
 
 typedef struct CellMetrics CellMetrics;
